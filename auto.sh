@@ -1,13 +1,19 @@
 #!/bin/bash
-# auto.sh — Claude lên plan & review, Gemini CLI (hoặc Antigravity CLI) viết code.
+# auto.sh — Claude lên plan & review, Antigravity CLI (agy) viết code.
 # Cách dùng:   ./auto.sh "mô tả dự án"
-# Tuỳ chọn:    CODER=agy MAX_TRIES=5 ./auto.sh "..."
 # Nếu PLAN.md đã có sẵn thì bỏ qua bước lập plan và làm tiếp theo plan đó.
+# Tuỳ chọn (biến môi trường):
+#   CODER=gemini ./auto.sh              # đổi coding agent (mặc định: agy)
+#   MAX_TRIES=5 ./auto.sh               # số vòng sửa tối đa mỗi task (mặc định: 3)
+#   PLAN_MODEL=sonnet ./auto.sh "..."   # model viết PLAN.md (mặc định: opus)
+#   REVIEW_MODEL=haiku ./auto.sh        # model review (mặc định: sonnet)
 
 set -euo pipefail
 
 CODER="${CODER:-agy}"         # Antigravity CLI (quyền lấy từ ~/.gemini/config/config.json)
 MAX_TRIES="${MAX_TRIES:-3}"   # số vòng sửa tối đa cho mỗi task
+PLAN_MODEL="${PLAN_MODEL:-opus}"        # model Claude viết PLAN.md
+REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"  # model Claude review (chạy nhiều lần → dùng model rẻ)
 LOG_DIR=".auto-logs"
 
 notify() { osascript -e "display notification \"$1\" with title \"auto.sh\"" 2>/dev/null || true; }
@@ -16,6 +22,18 @@ need()   { command -v "$1" >/dev/null || { echo "❌ Thiếu '$1'. $2"; exit 1; 
 need git    "Cài: xcode-select --install"
 need claude "Cài: curl -fsSL https://claude.ai/install.sh | bash"
 need "$CODER" "Cài Antigravity CLI (agy) trước"
+
+# In phần tổng quan của PLAN.md (trước '## Task 1') và đúng phần của Task N.
+# In rỗng nếu không tìm thấy heading của Task N.
+plan_excerpt() {
+  awk -v n="$1" '
+    /^## Task [0-9]+/ { intro = 0; match($0, /^## Task [0-9]+/); cur = substr($0, 9, RLENGTH - 8) + 0 }
+    NR == 1 { intro = 1 }
+    intro { head = head $0 "\n"; next }
+    cur == n { body = body $0 "\n" }
+    END { if (body != "") printf "%s%s", head, body }
+  ' PLAN.md
+}
 
 if [ ! -f PLAN.md ] && [ $# -lt 1 ]; then
   echo "Cách dùng: ./auto.sh \"mô tả dự án\""; exit 1
@@ -43,7 +61,7 @@ Yêu cầu định dạng BẮT BUỘC:
 - Mỗi task nhỏ, làm xong trong một lần chạy agent; ghi rõ file tạo/sửa và acceptance criteria kiểm chứng được bằng test.
 - Task 1 là dựng khung dự án và cấu hình test để TEST_CMD chạy được.
 - Viết để một coding agent khác làm theo mà không cần hỏi lại." \
-    --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" \
+    --model "$PLAN_MODEL" --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" \
     > "$LOG_DIR/plan.log" 2>&1
   [ -f PLAN.md ] || { echo "❌ Claude không tạo được PLAN.md, xem $LOG_DIR/plan.log"; exit 1; }
   git add -A && git commit -qm "PLAN.md"
@@ -74,19 +92,25 @@ for N in $(seq 1 "$TOTAL"); do
 
     # Script tự chạy test, không tin lời báo cáo của agent
     if TEST_OUT=$(bash -c "$TEST_CMD" 2>&1); then TEST_OK=1; else TEST_OK=0; fi
-    TEST_OUT=$(echo "$TEST_OUT" | tail -n 80)
+    TEST_OUT=$(echo "$TEST_OUT" | tail -n 60)
 
     git add -A
-    DIFF=$(git diff --cached HEAD | head -c 60000)
+    # Bỏ file lock / file sinh tự động để review gọn hơn
+    DIFF=$(git diff --cached HEAD -- . \
+      ':(exclude,glob)**/.venv/**' ':(exclude,glob)**/__pycache__/**' ':(exclude,glob)**/.pytest_cache/**' \
+      ':(exclude,glob)**/*.lock' ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/*.pyc' \
+      | head -c 40000)
+    PLAN_PART=$(plan_excerpt "$N")
+    [ -n "$PLAN_PART" ] || PLAN_PART=$(cat PLAN.md)
 
     echo "🔍 Claude đang review..."
     VERDICT=$( {
-      echo "=== PLAN.md ==="; cat PLAN.md
+      echo "=== PLAN.md (tổng quan + Task $N) ==="; echo "$PLAN_PART"
       echo; echo "=== KẾT QUẢ TEST (lệnh: $TEST_CMD, pass=$TEST_OK) ==="; echo "$TEST_OUT"
       echo; echo "=== GIT DIFF CỦA TASK $N ==="; echo "$DIFF"
-    } | claude -p "Bạn là reviewer nghiêm khắc. Review Task $N theo acceptance criteria trong PLAN.md, dựa trên kết quả test và diff ở trên. Kiểm tra cả bug, lỗ hổng bảo mật, edge case và chỗ lệch khỏi plan.
-Dòng ĐẦU TIÊN chỉ ghi đúng một từ: PASS hoặc FAIL.
-Nếu FAIL, các dòng sau là checklist lỗi cụ thể (file, vị trí, cách sửa) để coding agent làm theo." 2>&1 || echo "FAIL
+    } | claude -p --model "$REVIEW_MODEL" "Bạn là reviewer nghiêm khắc. Review Task $N theo acceptance criteria trong phần PLAN.md ở trên, dựa trên kết quả test và diff. Kiểm tra cả bug, lỗ hổng bảo mật, edge case và chỗ lệch khỏi plan.
+Trả lời NGẮN. Dòng ĐẦU TIÊN chỉ ghi đúng một từ: PASS hoặc FAIL.
+Nếu FAIL: tối đa 10 mục checklist, mỗi mục MỘT dòng dạng '- file:vị trí — lỗi — cách sửa', không chép lại code dài." 2>&1 || echo "FAIL
 Không gọi được Claude để review.")
 
     echo "$VERDICT" > "$LOG_DIR/task$N-try$TRY-review.md"
