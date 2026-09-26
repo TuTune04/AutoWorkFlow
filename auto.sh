@@ -6,6 +6,7 @@
 #   ./auto.sh                 đã có PLAN.md: chạy (hoặc chạy tiếp) theo plan
 #   ./auto.sh --check         chỉ kiểm tra công cụ, PLAN.md và git rồi thoát
 #   ./auto.sh --new-branch    ép tạo branch auto/* mới thay vì làm tiếp branch auto/* hiện tại
+#   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) rồi thoát
 #
 # Biến cấu hình: đặt trong .autowf.env ở gốc repo, hoặc qua env (env được ưu tiên hơn file):
 #   CODER=agy              coding agent: agy | gemini | ...
@@ -21,6 +22,9 @@
 #   FALLBACK_CODER=gemini MAX_TRIES=5 ./auto.sh
 #
 # Chạy tiếp: task đã có commit "Task N" trên branch hiện tại được bỏ qua.
+# Preflight quyền tự chạy trước vòng lặp task; bỏ qua nếu CODER, AGY_ALLOWED_CMDS, TEST_CMD và
+# ~/.gemini/config/config.json không đổi kể từ lần đạt trước (.auto-logs/preflight.ok).
+# Mã thoát: 1 lỗi/task FAIL, 2 cầu dao, 3 quá MAX_WAIT_HOURS, 4 không review được, 5 preflight chưa đạt.
 # Mỗi lần chạy ghi tóm tắt vào .auto-logs/summary.md.
 
 set -euo pipefail
@@ -29,11 +33,13 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 
 NEW_BRANCH=0
 CHECK_ONLY=0
+PREFLIGHT_ONLY=0
 DESC=""
 for arg in "$@"; do
   case "$arg" in
     --new-branch) NEW_BRANCH=1 ;;
     --check)      CHECK_ONLY=1 ;;
+    --preflight)  PREFLIGHT_ONLY=1 ;;
     -h|--help)    usage; exit 0 ;;
     -*)           echo "❌ Cờ không hợp lệ: $arg"; usage; exit 1 ;;
     *)            DESC="${DESC:+$DESC }$arg" ;;
@@ -69,6 +75,7 @@ MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-6}"
 AGY_ALLOWED_CMDS="${AGY_ALLOWED_CMDS:-git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which}"
 # Chỉ dùng khi test: thay thời gian chờ hạn mức bằng số giây này
 AUTOWF_TEST_WAIT_SECS="${AUTOWF_TEST_WAIT_SECS:-}"
+AGY_CONFIG="${AGY_CONFIG:-$HOME/.gemini/config/config.json}"
 
 LOG_DIR=".auto-logs"
 LIMIT_RE='usage limit|limit reached|rate limit|resets'
@@ -107,6 +114,212 @@ plan_excerpt() {
   ' PLAN.md
 }
 
+parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 1 nếu không đọc được
+  local t h m since target
+  t=$(grep -oE '\|[0-9]{10}' "$1" | head -n1 | tr -d '|' || true)
+  if [ -n "$t" ] && [ "$t" -gt "$2" ]; then echo "$t"; return 0; fi
+  t=$(grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})? ?(am|pm)?' "$1" | head -n1 | tr 'A-Z' 'a-z' || true)
+  [ -n "$t" ] || return 1
+  t=$(printf '%s' "$t" | sed -E 's/^resets( at)? //')
+  h=$(printf '%s' "$t" | sed -E 's/^([0-9]+).*/\1/')
+  m=$(printf '%s' "$t" | sed -nE 's/^[0-9]+:([0-9]{2}).*/\1/p')
+  h=$((10#$h)); m=$((10#${m:-0}))
+  case "$t" in
+    *pm) [ "$h" -lt 12 ] && h=$((h + 12)) ;;
+    *am) [ "$h" -eq 12 ] && h=0 ;;
+  esac
+  [ "$h" -lt 24 ] && [ "$m" -lt 60 ] || return 1
+  since=$((10#$(date +%H) * 3600 + 10#$(date +%M) * 60 + 10#$(date +%S)))
+  target=$(($2 - since + h * 3600 + m * 60))
+  [ "$target" -gt "$2" ] || target=$((target + 86400))
+  echo "$target"
+}
+
+# ---- Coding agent ----
+AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool."
+CODER_RC=0
+
+run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CODER_RC
+  CODER_RC=0
+  touch "$LOG_DIR/.coder-start"
+  case "$1" in
+    agy)    agy -p "$2 $AGY_RULES" ;;
+    gemini) gemini -p "$2" --yolo ;;
+    *)      "$1" -p "$2" ;;
+  esac < /dev/null > "$3" 2>&1 || CODER_RC=$?
+}
+
+ask_coder() {  # <prompt> <file log> — gọi CODER với đúng prompt này (không kèm quy tắc), dùng cho preflight
+  CODER_RC=0
+  touch "$LOG_DIR/.coder-start"
+  case "$CODER" in
+    gemini) gemini -p "$1" --yolo ;;
+    *)      "$CODER" -p "$1" ;;
+  esac < /dev/null > "$2" 2>&1 || CODER_RC=$?
+}
+
+allowed_cmds() { printf '%s\n' "$AGY_ALLOWED_CMDS" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | { grep -v '^$' || true; }; }
+first_exe()    { local w; for w in $1; do case "$w" in *=*) ;; *) echo "$w"; return 0 ;; esac; done; }
+# Quy tắc hẹp cho agy: chỉ lệnh này, không cho nối lệnh khác bằng ; & | ` $
+cmd_rule()     { printf 'command(regex:^%s( [^;&|`$]*)?$)' "$(printf '%s' "$1" | sed 's/[].[\*^$()+?{}|]/\\&/g')"; }
+
+# Lệnh gần nhất agy chạy (từ conversation mới hơn lần gọi agent cuối), rỗng nếu không tìm được
+agy_last_command() {
+  local db
+  command -v sqlite3 >/dev/null || return 0
+  db=$(find "$HOME/.gemini/antigravity-cli/conversations" -name '*.db' -newer "$LOG_DIR/.coder-start" 2>/dev/null | head -n1 || true)
+  [ -n "$db" ] || return 0
+  sqlite3 "$db" "select step_payload from steps order by idx desc limit 4" 2>/dev/null | strings \
+    | grep -oE '"CommandLine":"[^"]*"' | head -n1 | sed -E 's/^"CommandLine":"//; s/"$//; s/\\u003e/>/g; s/\\u003c/</g; s/\\u0026/\&/g' || true
+}
+
+DIAG_AUTH_RE='not logged in|login required|please (log|sign) ?in|auth method|unauthenticated|authentication (failed|required)|reauthenticate|token (has )?expired|invalid_grant'
+DIAG_PERM_RE='auto-denied|cannot prompt|permission denied|not allowed by|denied by (policy|permission)'
+DIAG_QUOTA_RE='quota|resource.?exhausted|too many requests|(status|code|error) 429|rate.?limit|usage limit|limit reached'
+DIAG_TIMEOUT_RE='timed? ?out|deadline exceeded'
+DIAG_CRASH_RE='panic:|segmentation fault|fatal error|traceback \(most recent|core dumped|unexpected error'
+
+# diagnose_agent_log <file log> [exit code] → in "LOẠI|dòng bằng chứng"
+# LOẠI: AUTH | PERMISSION | QUOTA | TIMEOUT | CRASH | NO_ACTION | UNKNOWN
+diagnose_agent_log() {
+  local f="$1" rc="${2:-0}" pair type re line
+  for pair in "AUTH:$DIAG_AUTH_RE" "PERMISSION:$DIAG_PERM_RE" "QUOTA:$DIAG_QUOTA_RE" "TIMEOUT:$DIAG_TIMEOUT_RE" "CRASH:$DIAG_CRASH_RE"; do
+    type="${pair%%:*}"; re="${pair#*:}"
+    line=$(grep -iE -m1 "$re" "$f" 2>/dev/null | cut -c1-240 || true)
+    if [ -n "$line" ]; then echo "$type|$line"; return 0; fi
+  done
+  line=$({ grep -v '^[[:space:]]*$' "$f" 2>/dev/null || true; } | tail -n1 | cut -c1-240)
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; then echo "TIMEOUT|exit code $rc${line:+ — $line}"
+  elif [ "$rc" -ne 0 ]; then echo "CRASH|exit code $rc${line:+ — $line}"
+  elif [ -n "$line" ]; then echo "NO_ACTION|$line"
+  else echo "UNKNOWN|"
+  fi
+}
+
+# diag_advice <LOẠI> <bằng chứng> <file log> → cách xử lý cụ thể
+diag_advice() {
+  local type="$1" ev="$2" log="$3" tool cmd now at
+  case "$type" in
+    AUTH) echo "Đăng nhập lại: mở Terminal, chạy \`$ACTIVE_CODER\` và làm theo hướng dẫn đăng nhập, rồi chạy lại auto.sh." ;;
+    PERMISSION)
+      tool=$(printf '%s' "$ev" | sed -nE 's/.*required the "([A-Za-z_]+)" permission.*/\1/p')
+      cmd=""; [ "$tool" = write_file ] || cmd=$(agy_last_command)
+      if [ "$tool" = write_file ]; then
+        echo "Thêm vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG): write_file($(pwd -P))"
+      elif [ -n "$cmd" ]; then
+        echo "Lệnh bị từ chối: $cmd"
+        case "$cmd" in *';'*|*'&&'*|*'|'*|*'$('*) echo "Lệnh này nối nhiều lệnh — quy tắc hẹp không cho phép; hãy nhắc agent chạy từng lệnh một." ;; esac
+        echo "Thêm vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG): $(cmd_rule "$(first_exe "$cmd")")"
+        echo "và thêm '$(first_exe "$cmd")' vào AGY_ALLOWED_CMDS trong .autowf.env."
+      else
+        echo "Chạy \`auto.sh --preflight\` để biết quy tắc nào còn thiếu (dạng $(cmd_rule '<lệnh>'))."
+      fi ;;
+    QUOTA)
+      now=$(date +%s)
+      if at=$(parse_reset_time "$log" "$now"); then echo "Hết hạn mức phía agent: chờ tới $(fmt_time "$at") rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER)."
+      else echo "Hết hạn mức phía agent: chờ khoảng 60 phút rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER=gemini)."; fi ;;
+    TIMEOUT)   echo "Agent chạy quá thời gian: chia Task này nhỏ hơn trong PLAN.md hoặc chạy lại auto.sh." ;;
+    CRASH)     echo "Agent thoát bất thường: xem log, thử cập nhật agent (\`$ACTIVE_CODER update\`) rồi chạy lại auto.sh." ;;
+    NO_ACTION) echo "Agent chạy xong nhưng không sửa file nào: đọc log xem nó hiểu sai gì, làm rõ Task trong PLAN.md rồi chạy lại." ;;
+    *)         echo "Không rõ nguyên nhân: xem $log." ;;
+  esac
+}
+
+# ---- Preflight quyền ----
+preflight_hash() {
+  local h="shasum -a 256"; command -v shasum >/dev/null || h=sha256sum
+  { printf '%s\n' "$CODER" "$AGY_ALLOWED_CMDS" "${TEST_CMD:-}"; cat "$AGY_CONFIG" 2>/dev/null || true; } | $h | cut -d' ' -f1
+}
+preflight_cached() { [ -f "$LOG_DIR/preflight.ok" ] && grep -qxF "hash=$(preflight_hash)" "$LOG_DIR/preflight.ok"; }
+
+probe_cmd() {  # lệnh vô hại để thử quyền của một lệnh
+  case "$1" in
+    git)   echo "git status --short" ;;
+    ls)    echo "ls" ;;
+    mkdir) echo "mkdir -p $LOG_DIR" ;;
+    which) echo "which git" ;;
+    *)     echo "$1 --version" ;;
+  esac
+}
+
+# In bảng ✅/❌; trả về 1 nếu có mục ❌ (quy tắc cần thêm để ở PREFLIGHT_REPORT)
+run_preflight() {
+  local ok=1 rules="" fails="" c probe log d name exe
+  mkdir -p "$LOG_DIR"
+  echo "🔎 Preflight quyền cho $CODER (log: $LOG_DIR/preflight-*.log)"
+
+  log="$LOG_DIR/preflight-auth.log"
+  ask_coder "Reply with the single word OK. Do not run any commands or tools." "$log"
+  d=$(diagnose_agent_log "$log" "$CODER_RC")
+  if [ "${d%%|*}" = NO_ACTION ]; then
+    echo "  ✅ Đăng nhập $CODER"
+  else
+    echo "  ❌ Đăng nhập $CODER — ${d%%|*}: ${d#*|}"
+    ACTIVE_CODER="$CODER"
+    PREFLIGHT_REPORT="❌ Đăng nhập $CODER — ${d%%|*}: ${d#*|}"$'\n'"Cách xử lý: $(diag_advice "${d%%|*}" "${d#*|}" "$log")"
+    echo "  ⏭️  Bỏ qua các mục còn lại"
+    return 1
+  fi
+
+  if [ "$CODER" = agy ]; then
+    while IFS= read -r c; do
+      probe=$(probe_cmd "$c")
+      name=$(printf '%s' "$c" | tr -c 'A-Za-z0-9_-' '_')
+      log="$LOG_DIR/preflight-$name.log"
+      ask_coder "Run exactly this one command and nothing else: $probe" "$log"
+      if grep -qiE "$DIAG_PERM_RE" "$log"; then
+        echo "  ❌ Lệnh $c ($probe) — BỊ TỪ CHỐI"
+        fails+="❌ Lệnh $c — BỊ TỪ CHỐI (log: $log)"$'\n'; rules+="$(cmd_rule "$c")"$'\n'; ok=0
+      else
+        echo "  ✅ Lệnh $c ($probe) — ĐẠT"
+      fi
+    done < <(allowed_cmds)
+  fi
+
+  log="$LOG_DIR/preflight-write.log"
+  rm -f .autowf-probe.txt
+  ask_coder "Create a file named .autowf-probe.txt in the current directory containing the word ok. Do not run any shell commands." "$log"
+  if [ -f .autowf-probe.txt ]; then
+    rm -f .autowf-probe.txt
+    echo "  ✅ Ghi file (.autowf-probe.txt)"
+  else
+    echo "  ❌ Ghi file (.autowf-probe.txt) — agent không tạo được file"
+    fails+="❌ Ghi file — agent không tạo được .autowf-probe.txt (log: $log)"$'\n'; ok=0
+    [ "$CODER" != agy ] || rules+="write_file($(pwd -P))"$'\n'
+  fi
+
+  if [ "$CODER" = agy ]; then
+    if [ -z "${TEST_CMD:-}" ]; then
+      echo "  ⚠️  Chưa có TEST_CMD (PLAN.md) — bỏ qua kiểm tra lệnh test"
+    else
+      exe=$(first_exe "$TEST_CMD")
+      if grep -qxF "$exe" <<< "$(allowed_cmds)"; then
+        echo "  ✅ TEST_CMD bắt đầu bằng '$exe' (có trong AGY_ALLOWED_CMDS)"
+      else
+        echo "  ❌ TEST_CMD bắt đầu bằng '$exe' nhưng '$exe' không có trong AGY_ALLOWED_CMDS"
+        fails+="❌ TEST_CMD dùng '$exe' không có trong AGY_ALLOWED_CMDS → thêm '$exe' vào AGY_ALLOWED_CMDS (.autowf.env)"$'\n'
+        rules+="$(cmd_rule "$exe")"$'\n'; ok=0
+      fi
+    fi
+  fi
+
+  if [ "$ok" -eq 1 ]; then
+    { echo "hash=$(preflight_hash)"; echo "date=$(date '+%Y-%m-%d %H:%M:%S')"; echo "coder=$CODER"; } > "$LOG_DIR/preflight.ok"
+    echo "✅ Preflight đạt (đã lưu $LOG_DIR/preflight.ok)"
+    return 0
+  fi
+  rm -f "$LOG_DIR/preflight.ok"
+  PREFLIGHT_REPORT="$fails"
+  if [ -n "$rules" ]; then
+    echo "❌ Preflight chưa đạt. Thêm các quy tắc sau vào userSettings.globalPermissionGrants.allow trong $AGY_CONFIG:"
+    printf '%s' "$rules" | sed 's/^/     /'
+    PREFLIGHT_REPORT+="Quy tắc cần thêm vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG):"$'\n'"$rules"
+  else
+    echo "❌ Preflight chưa đạt."
+  fi
+  return 1
+}
+
 # ---- --check ----
 if [ "$CHECK_ONLY" -eq 1 ]; then
   OK=1
@@ -116,13 +329,24 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   if load_plan; then echo "✅ PLAN.md hợp lệ: $TOTAL task, TEST_CMD: $TEST_CMD"
   else echo "❌ PLAN.md: $PLAN_ERR"; OK=0; fi
   if git rev-parse --git-dir >/dev/null 2>&1; then
-    if [ -z "$(git status --porcelain)" ]; then echo "✅ Git sạch (branch $(git branch --show-current))"
-    else echo "❌ Git còn thay đổi chưa commit:"; git status --short; OK=0; fi
+    if [ -z "$(git status --porcelain -- . ":(exclude)$LOG_DIR")" ]; then echo "✅ Git sạch (branch $(git branch --show-current))"
+    else echo "❌ Git còn thay đổi chưa commit:"; git status --short -- . ":(exclude)$LOG_DIR"; OK=0; fi
   else
     echo "⚠️  Chưa phải git repo — auto.sh sẽ git init khi chạy"
   fi
+  if preflight_cached; then echo "✅ Preflight quyền đã đạt với cấu hình hiện tại"
+  else echo "ℹ️  Preflight quyền chưa chạy với cấu hình hiện tại (sẽ tự chạy, hoặc: auto.sh --preflight)"; fi
   [ "$OK" -eq 1 ] && { echo "👍 Sẵn sàng chạy"; exit 0; }
   exit 1
+fi
+
+# ---- --preflight: chỉ kiểm tra quyền rồi thoát ----
+if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
+  need "$CODER" "Cài coding agent '$CODER' trước (mặc định: Antigravity CLI agy)"
+  ACTIVE_CODER="$CODER"
+  load_plan || TEST_CMD=""
+  if run_preflight; then exit 0; fi
+  exit 5
 fi
 
 need claude "Cài: curl -fsSL https://claude.ai/install.sh | bash"
@@ -139,9 +363,9 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
   git add -A && git commit -qm "Before auto.sh" --allow-empty
 fi
 git rev-parse -q --verify HEAD >/dev/null || git commit -qm "Initial commit (auto.sh)" --allow-empty
-if [ -n "$(git status --porcelain)" ]; then
+if [ -n "$(git status --porcelain -- . ":(exclude)$LOG_DIR")" ]; then
   echo "⛔ Repo còn thay đổi chưa commit — auto.sh không tự commit hộ. Hãy commit hoặc stash rồi chạy lại:"
-  git status --short
+  git status --short -- . ":(exclude)$LOG_DIR"
   echo "   (Bỏ phần dở của lần chạy trước: git stash -u   hoặc   git checkout -- . && git clean -fd)"
   exit 1
 fi
@@ -171,6 +395,8 @@ fi
 # ---- Tóm tắt cuối mỗi lần chạy ----
 RUN_START=$(date +%s)
 STOP_REASON=""
+STOP_DETAILS=""
+PREFLIGHT_REPORT=""
 TOTAL=0
 WAIT_COUNT=0
 WAITED_SECS=0
@@ -190,6 +416,13 @@ write_summary() {
     echo "- Coding agent: $CODER${FALLBACK_NOTE:+ — $FALLBACK_NOTE}; review: $REVIEW_MODEL"
     echo "- Số lần chờ hạn mức Claude: $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
     echo "- Kết thúc: $STOP_REASON"
+    if [ "$rc" -ne 0 ]; then
+      echo
+      echo "## Nguyên nhân"
+      echo
+      echo "$STOP_REASON"
+      if [ -n "$STOP_DETAILS" ]; then echo; echo '```'; printf '%s\n' "$STOP_DETAILS"; echo '```'; fi
+    fi
     # seq trên macOS với `seq 1 0` in ra "1 0", nên chỉ in bảng khi đã đọc được plan
     if [ "$TOTAL" -gt 0 ]; then
       echo
@@ -210,9 +443,11 @@ write_summary() {
 trap write_summary EXIT
 trap 'STOP_REASON="Bị ngắt (Ctrl-C/TERM)"; exit 130' INT TERM
 
-stop() {  # stop <exit code> <lý do>
+stop() {  # stop <exit code> <lý do> [chi tiết nhiều dòng]
   STOP_REASON="$2"
+  STOP_DETAILS="${3:-}"
   echo "⛔ $2"
+  if [ -n "$STOP_DETAILS" ]; then printf '%s\n' "$STOP_DETAILS" | sed 's/^/   /'; fi
   notify "$2"
   exit "$1"
 }
@@ -222,27 +457,6 @@ is_usage_limit() {  # <file output> <exit code>
   if [ "$2" -ne 0 ]; then grep -qiE "$LIMIT_RE" "$1"
   else head -n1 "$1" | grep -qiE "$LIMIT_RE"   # thành công thì chỉ xét dòng đầu (dòng PASS/FAIL)
   fi
-}
-
-parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 1 nếu không đọc được
-  local t h m since target
-  t=$(grep -oE '\|[0-9]{10}' "$1" | head -n1 | tr -d '|' || true)
-  if [ -n "$t" ] && [ "$t" -gt "$2" ]; then echo "$t"; return 0; fi
-  t=$(grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})? ?(am|pm)?' "$1" | head -n1 | tr 'A-Z' 'a-z' || true)
-  [ -n "$t" ] || return 1
-  t=$(printf '%s' "$t" | sed -E 's/^resets( at)? //')
-  h=$(printf '%s' "$t" | sed -E 's/^([0-9]+).*/\1/')
-  m=$(printf '%s' "$t" | sed -nE 's/^[0-9]+:([0-9]{2}).*/\1/p')
-  h=$((10#$h)); m=$((10#${m:-0}))
-  case "$t" in
-    *pm) [ "$h" -lt 12 ] && h=$((h + 12)) ;;
-    *am) [ "$h" -eq 12 ] && h=0 ;;
-  esac
-  [ "$h" -lt 24 ] && [ "$m" -lt 60 ] || return 1
-  since=$((10#$(date +%H) * 3600 + 10#$(date +%M) * 60 + 10#$(date +%S)))
-  target=$(($2 - since + h * 3600 + m * 60))
-  [ "$target" -gt "$2" ] || target=$((target + 86400))
-  echo "$target"
 }
 
 # claude_call <file stdin> <file output> <tham số cho claude...>
@@ -274,17 +488,6 @@ claude_call() {
   done
 }
 
-# ---- Coding agent ----
-AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool."
-
-run_coder() {  # <agent> <prompt> <file log>
-  case "$1" in
-    agy)    agy -p "$2 $AGY_RULES" ;;
-    gemini) gemini -p "$2" --yolo ;;
-    *)      "$1" -p "$2" ;;
-  esac < /dev/null > "$3" 2>&1 || true
-}
-
 # Test bị lỗi: lấy vài dòng lỗi cuối, bỏ số dòng / đường dẫn tạm / thời gian để so giữa các vòng
 test_signature() {
   printf '%s\n' "$1" | { grep -v '^[[:space:]]*$' || true; } | tail -n 5 | sed -E \
@@ -306,7 +509,7 @@ MANDATORY format:
 - Task 1 sets up the project skeleton and test configuration so TEST_CMD runs.
 - Write it so another coding agent can follow it without asking questions." \
     --model "$PLAN_MODEL" --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" || true
-  [ -f PLAN.md ] || stop 1 "Claude không tạo được PLAN.md, xem $LOG_DIR/plan.log"
+  [ -f PLAN.md ] || stop 1 "Claude không tạo được PLAN.md, xem $LOG_DIR/plan.log" "$(tail -n 5 "$LOG_DIR/plan.log" 2>/dev/null || true)"
   git add -A && git commit -qm "PLAN.md"
 fi
 
@@ -317,8 +520,15 @@ PLAN_COMMIT=$(git log -1 --format=%H -- PLAN.md)
 DONE_SUBJECTS=""
 [ -z "$PLAN_COMMIT" ] || DONE_SUBJECTS=$(git log --format=%s "$PLAN_COMMIT"..HEAD)
 
-# ---- Bước 2: vòng lặp code → test → review ----
+# ---- Preflight quyền (bỏ qua nếu cấu hình không đổi kể từ lần đạt trước) ----
 ACTIVE_CODER="$CODER"
+if preflight_cached; then
+  echo "✅ Preflight: bỏ qua (cấu hình quyền không đổi kể từ lần đạt trước; ép chạy lại: auto.sh --preflight)"
+else
+  run_preflight || stop 5 "Preflight quyền chưa đạt — chưa chạy task nào" "$PREFLIGHT_REPORT"
+fi
+
+# ---- Bước 2: vòng lặp code → test → review ----
 for N in $(seq 1 "$TOTAL"); do
   if grep -qxF "Task $N" <<< "$DONE_SUBJECTS"; then
     T_STATUS[N]="SKIP (đã commit trước đó)"
@@ -351,7 +561,13 @@ for N in $(seq 1 "$TOTAL"); do
     # Cầu dao (a): agent không đổi file nào
     if [ -z "$(git status --porcelain)" ]; then
       T_END[N]=$(date +%s)
-      stop 2 "Cầu dao: agent không thay đổi file nào ở Task $N (lần $TRY) — thường do bị từ chối quyền hoặc chưa đăng nhập. Xem $CODE_LOG"
+      DIAG=$(diagnose_agent_log "$CODE_LOG" "$CODER_RC")
+      DIAG_TYPE="${DIAG%%|*}"; DIAG_EV="${DIAG#*|}"
+      stop 2 "Cầu dao: agent không thay đổi file nào ở Task $N (lần $TRY) — lỗi $DIAG_TYPE" \
+        "Loại lỗi: $DIAG_TYPE
+Bằng chứng: ${DIAG_EV:-(log trống)}
+Log: $CODE_LOG (exit code $CODER_RC)
+Cách xử lý: $(diag_advice "$DIAG_TYPE" "$DIAG_EV" "$CODE_LOG")"
     fi
 
     # Script tự chạy test, không tin lời báo cáo của agent
@@ -364,7 +580,10 @@ for N in $(seq 1 "$TOTAL"); do
       SIG=$(test_signature "$TEST_OUT")
       if [ -n "$PREV_SIG" ] && [ "$SIG" = "$PREV_SIG" ]; then
         T_END[N]=$(date +%s)
-        stop 2 "Cầu dao: lỗi test ở Task $N lần $TRY giống hệt lần trước — agent đang lặp lại, dừng sớm. Xem $LOG_DIR/task$N-try$TRY-test.log"
+        stop 2 "Cầu dao: lỗi test ở Task $N lần $TRY giống hệt lần trước — agent đang lặp lại, dừng sớm" \
+          "5 dòng lỗi test lặp lại:
+$(printf '%s\n' "$TEST_OUT" | { grep -v '^[[:space:]]*$' || true; } | tail -n 5)
+Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY - 1))-test.log)"
       fi
       PREV_SIG="$SIG"
     else
@@ -388,7 +607,7 @@ for N in $(seq 1 "$TOTAL"); do
     claude_call "$REVIEW_IN" "$REVIEW_OUT" -p --model "$REVIEW_MODEL" "You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
 Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL.
 If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix'. Do not paste long code." \
-      || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT"; }
+      || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
 
     VERDICT=$(cat "$REVIEW_OUT")
     FIRST=$(printf '%s' "${VERDICT%%$'\n'*}" | tr -d '[:space:]*#')
@@ -407,7 +626,9 @@ If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location �
 
     if [ "$TRY" -eq "$MAX_TRIES" ]; then
       T_END[N]=$(date +%s)
-      stop 1 "Task $N thất bại sau $MAX_TRIES lần. Xem REVIEW.md và $LOG_DIR/"
+      stop 1 "Task $N thất bại sau $MAX_TRIES lần. Xem REVIEW.md và $LOG_DIR/" \
+        "Lỗi còn lại theo review/test lần cuối (REVIEW.md):
+$(head -n 12 REVIEW.md 2>/dev/null || true)"
     fi
     PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Re-run: $TEST_CMD. Update PROGRESS.md."
   done
