@@ -179,3 +179,197 @@ def test_subprocess_run(tmp_path: Path):
     assert result.returncode == 0
     assert "Đã thêm #1: abc" in result.stdout
     assert path.exists()
+
+
+def test_done_command(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Mua sữa"]) == 0
+    capsys.readouterr()
+
+    ret = main(["done", "1"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã hoàn thành #1: Mua sữa" in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 1
+    assert tasks[0].done is True
+
+
+def test_undone_command(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Mua sữa"]) == 0
+    assert main(["done", "1"]) == 0
+    capsys.readouterr()
+
+    ret = main(["undone", "1"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã bỏ đánh dấu #1: Mua sữa" in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 1
+    assert tasks[0].done is False
+
+
+def test_edit_command(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Mua sữa"]) == 0
+    capsys.readouterr()
+
+    ret = main(["edit", "1", "Mua", "sữa", "tươi", "tiệt", "trùng"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã sửa #1: Mua sữa tươi tiệt trùng" in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 1
+    assert tasks[0].title == "Mua sữa tươi tiệt trùng"
+
+
+def test_delete_command(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Mua sữa"]) == 0
+    capsys.readouterr()
+
+    ret = main(["delete", "1"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã xoá #1: Mua sữa" in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 0
+
+
+def test_clear_command(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Việc 1"]) == 0
+    assert main(["add", "Việc 2"]) == 0
+    assert main(["add", "Việc 3"]) == 0
+    assert main(["done", "1"]) == 0
+    assert main(["done", "3"]) == 0
+    capsys.readouterr()
+
+    ret = main(["clear"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã xoá 2 công việc đã hoàn thành." in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 1
+    assert tasks[0].id == 2
+    assert tasks[0].title == "Việc 2"
+
+
+def test_clear_none_done(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Việc chưa xong"]) == 0
+    capsys.readouterr()
+
+    ret = main(["clear"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Đã xoá 0 công việc đã hoàn thành." in captured.out
+
+    tasks = load_tasks(todo_file)
+    assert len(tasks) == 1
+
+
+@pytest.mark.parametrize(
+    "cmd_args",
+    [
+        ["done", "99"],
+        ["undone", "99"],
+        ["edit", "99", "Tiêu đề mới"],
+        ["delete", "99"],
+    ],
+)
+def test_commands_non_existent_id(cmd_args: list[str], todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    ret = main(cmd_args)
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Lỗi: ")
+    assert "Không tìm thấy công việc #99" in captured.err
+
+
+def test_edit_empty_title(todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["add", "Việc 1"]) == 0
+    capsys.readouterr()
+
+    ret = main(["edit", "1", "   "])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Lỗi: ")
+    assert "Tiêu đề không được rỗng" in captured.err
+
+
+@pytest.mark.parametrize(
+    "cmd_args",
+    [
+        ["done", "abc"],
+        ["undone", "abc"],
+        ["edit", "abc", "x"],
+        ["delete", "abc"],
+    ],
+)
+def test_invalid_id_type_argparse(cmd_args: list[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        main(cmd_args)
+    assert exc_info.value.code == 2
+
+
+def test_subprocess_task6_flow(tmp_path: Path):
+    path = tmp_path / "flow_todo.json"
+    repo_root = Path(__file__).resolve().parent.parent
+
+    # Add
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "add", "Học", "bài"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+
+    # Edit
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "edit", "1", "Học", "toán"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+    assert "Đã sửa #1: Học toán" in res.stdout
+
+    # Done
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "done", "1"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+    assert "Đã hoàn thành #1: Học toán" in res.stdout
+
+    # Undone
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "undone", "1"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+    assert "Đã bỏ đánh dấu #1: Học toán" in res.stdout
+
+    # Done again & Clear
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "done", "1"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "clear"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 0
+    assert "Đã xoá 1 công việc đã hoàn thành." in res.stdout
+

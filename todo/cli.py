@@ -47,6 +47,26 @@ def build_parser() -> argparse.ArgumentParser:
     list_group.add_argument("--pending", action="store_true", help="Chỉ liệt kê công việc chưa hoàn thành")
     list_group.add_argument("--done", action="store_true", help="Chỉ liệt kê công việc đã hoàn thành")
 
+    # Subcommand: done
+    done_parser = subparsers.add_parser("done", help="Đánh dấu công việc đã hoàn thành")
+    done_parser.add_argument("id", type=int, help="ID công việc")
+
+    # Subcommand: undone
+    undone_parser = subparsers.add_parser("undone", help="Bỏ đánh dấu công việc đã hoàn thành")
+    undone_parser.add_argument("id", type=int, help="ID công việc")
+
+    # Subcommand: edit
+    edit_parser = subparsers.add_parser("edit", help="Sửa tiêu đề công việc")
+    edit_parser.add_argument("id", type=int, help="ID công việc")
+    edit_parser.add_argument("title", nargs="+", help="Tiêu đề mới của công việc")
+
+    # Subcommand: delete
+    delete_parser = subparsers.add_parser("delete", help="Xoá công việc")
+    delete_parser.add_argument("id", type=int, help="ID công việc")
+
+    # Subcommand: clear
+    subparsers.add_parser("clear", help="Xoá tất cả công việc đã hoàn thành")
+
     return parser
 
 
@@ -78,6 +98,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             else:
                 for t in tasks:
                     print(f"[{'x' if t.done else ' '}] {t.id}. {t.title}")
+            return 0
+        elif args.command == "done":
+            task = todo_list.complete(args.id)
+            print(f"Đã hoàn thành #{task.id}: {task.title}")
+            return 0
+        elif args.command == "undone":
+            task = todo_list.uncomplete(args.id)
+            print(f"Đã bỏ đánh dấu #{task.id}: {task.title}")
+            return 0
+        elif args.command == "edit":
+            title = " ".join(args.title)
+            task = todo_list.edit(args.id, title)
+            print(f"Đã sửa #{task.id}: {task.title}")
+            return 0
+        elif args.command == "delete":
+            task = todo_list.delete(args.id)
+            print(f"Đã xoá #{task.id}: {task.title}")
+            return 0
+        elif args.command == "clear":
+            count = todo_list.clear_done()
+            print(f"Đã xoá {count} công việc đã hoàn thành.")
             return 0
         else:
             return 2

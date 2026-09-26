@@ -104,5 +104,26 @@
     - Kiểm tra chạy subprocess qua `sys.executable -m todo --file <path> add abc` thành công với returncode 0.
   - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 93 tests đều pass.
 
-
-
+## Task 6: CLI — lệnh `done`, `undone`, `edit`, `delete`, `clear`
+- **Trạng thái**: Hoàn thành
+- **Các việc đã làm**:
+  - Cập nhật [todo/cli.py](file:///Users/thai/project4fun/automaticWorkFlow/todo/cli.py):
+    - Bổ sung cấu hình các subcommand trong `build_parser()`:
+      - `done`: nhận `id` kiểu số nguyên (`type=int`), gọi `todo_list.complete(args.id)` và in `Đã hoàn thành #<id>: <title>`.
+      - `undone`: nhận `id` kiểu số nguyên (`type=int`), gọi `todo_list.uncomplete(args.id)` và in `Đã bỏ đánh dấu #<id>: <title>`.
+      - `edit`: nhận `id` kiểu số nguyên (`type=int`) và `title` (`nargs="+"`), nối các từ lại bằng dấu cách, gọi `todo_list.edit(args.id, title)` và in `Đã sửa #<id>: <title>`.
+      - `delete`: nhận `id` kiểu số nguyên (`type=int`), gọi `todo_list.delete(args.id)` và in `Đã xoá #<id>: <title>`.
+      - `clear`: không nhận tham số, gọi `todo_list.clear_done()` và in `Đã xoá <count> công việc đã hoàn thành.`.
+    - Cập nhật hàm `main()` điều phối các subcommand trên, gọi phương thức tương ứng của `TodoList`, trả về mã `0` khi thành công; các ngoại lệ nghiệp vụ `TodoError` (ví dụ id không tồn tại, tiêu đề sửa rỗng) và `StorageError` được bắt tại try/except chung in `Lỗi: <msg>` ra stderr và trả về mã `1`.
+  - Cập nhật [tests/test_cli.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/test_cli.py):
+    - Thêm test `test_done_command`: kiểm tra lệnh `done` hoàn thành công việc thành công, in thông điệp chuẩn và cập nhật file JSON (`done=True`).
+    - Thêm test `test_undone_command`: kiểm tra lệnh `undone` bỏ đánh dấu hoàn thành, in thông điệp chuẩn và cập nhật file JSON (`done=False`).
+    - Thêm test `test_edit_command`: kiểm tra lệnh `edit` ghép nối các từ, in thông điệp chuẩn và cập nhật tiêu đề mới vào file JSON.
+    - Thêm test `test_delete_command`: kiểm tra lệnh `delete` xoá công việc thành công, in thông điệp chuẩn và loại bỏ khỏi file JSON.
+    - Thêm test `test_clear_command`: kiểm tra lệnh `clear` xoá các công việc đã hoàn thành và giữ nguyên các công việc chưa xong.
+    - Thêm test `test_clear_none_done`: kiểm tra lệnh `clear` khi không có công việc nào hoàn thành in `Đã xoá 0 công việc đã hoàn thành.`.
+    - Thêm test `test_commands_non_existent_id`: kiểm tra `done 99`, `undone 99`, `edit 99 x`, `delete 99` đều trả về mã 1 và stderr in `Lỗi: Không tìm thấy công việc #99` (dùng `pytest.mark.parametrize`).
+    - Thêm test `test_edit_empty_title`: kiểm tra `edit 1 "   "` trả về mã 1 và stderr in `Lỗi: Tiêu đề không được rỗng`.
+    - Thêm test `test_invalid_id_type_argparse`: kiểm tra `done abc`, `undone abc`, `edit abc x`, `delete abc` bị argparse chặn lại và raise `SystemExit` mã 2 (dùng `pytest.mark.parametrize`).
+    - Thêm test `test_subprocess_task6_flow`: kiểm tra end-to-end chuỗi lệnh thực thi thực tế qua subprocess từ dòng lệnh (`add` -> `edit` -> `done` -> `undone` -> `done` -> `clear`).
+  - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 109 tests đều pass.
