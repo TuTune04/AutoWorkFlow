@@ -190,17 +190,20 @@ write_summary() {
     echo "- Coding agent: $CODER${FALLBACK_NOTE:+ — $FALLBACK_NOTE}; review: $REVIEW_MODEL"
     echo "- Số lần chờ hạn mức Claude: $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
     echo "- Kết thúc: $STOP_REASON"
-    echo
-    echo "| Task | Kết quả | Số vòng | Thời gian |"
-    echo "|---|---|---|---|"
-    for n in $(seq 1 "$TOTAL"); do
-      if [ -n "${T_BEGIN[$n]:-}" ]; then
-        end="${T_END[$n]:-$(date +%s)}"
-        echo "| $n | ${T_STATUS[$n]:-?} | ${T_TRIES[$n]:-0} | $(fmt_dur $((end - T_BEGIN[n]))) |"
-      else
-        echo "| $n | ${T_STATUS[$n]:-chưa chạy} | - | - |"
-      fi
-    done
+    # seq trên macOS với `seq 1 0` in ra "1 0", nên chỉ in bảng khi đã đọc được plan
+    if [ "$TOTAL" -gt 0 ]; then
+      echo
+      echo "| Task | Kết quả | Số vòng | Thời gian |"
+      echo "|---|---|---|---|"
+      for n in $(seq 1 "$TOTAL"); do
+        if [ -n "${T_BEGIN[$n]:-}" ]; then
+          end="${T_END[$n]:-$(date +%s)}"
+          echo "| $n | ${T_STATUS[$n]:-?} | ${T_TRIES[$n]:-0} | $(fmt_dur $((end - T_BEGIN[n]))) |"
+        else
+          echo "| $n | ${T_STATUS[$n]:-chưa chạy} | - | - |"
+        fi
+      done
+    fi
   } > "$LOG_DIR/summary.md"
   echo "📝 Tóm tắt: $LOG_DIR/summary.md"
 }
@@ -309,7 +312,10 @@ fi
 
 load_plan || stop 1 "PLAN.md không hợp lệ: $PLAN_ERR"
 echo "📋 $TOTAL task — lệnh test: $TEST_CMD"
-DONE_SUBJECTS=$(git log --format=%s)
+# Chỉ tính "Task N" commit sau lần sửa PLAN.md gần nhất (task của plan cũ đã merge không được tính)
+PLAN_COMMIT=$(git log -1 --format=%H -- PLAN.md)
+DONE_SUBJECTS=""
+[ -z "$PLAN_COMMIT" ] || DONE_SUBJECTS=$(git log --format=%s "$PLAN_COMMIT"..HEAD)
 
 # ---- Bước 2: vòng lặp code → test → review ----
 ACTIVE_CODER="$CODER"
