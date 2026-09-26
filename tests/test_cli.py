@@ -155,12 +155,39 @@ def test_corrupted_file_error(todo_file: Path, capsys: pytest.CaptureFixture[str
     assert captured_list.err.startswith("Lỗi: ")
     assert str(todo_file) in captured_list.err
 
-    # main(["add", "abc"]) khi file hỏng
-    ret_add = main(["add", "abc"])
+    # main(["add", "x"]) khi file hỏng
+    ret_add = main(["add", "x"])
     assert ret_add == 1
     captured_add = capsys.readouterr()
     assert captured_add.err.startswith("Lỗi: ")
     assert str(todo_file) in captured_add.err
+
+    # File hỏng không bị ghi đè hay sửa
+    assert todo_file.read_text(encoding="utf-8") == "{not json"
+
+
+@pytest.mark.parametrize(
+    "cmd_args",
+    [
+        ["list"],
+        ["list", "--pending"],
+        ["list", "--done"],
+        ["add", "x"],
+        ["done", "1"],
+        ["undone", "1"],
+        ["edit", "1", "y"],
+        ["delete", "1"],
+        ["clear"],
+    ],
+)
+def test_all_commands_corrupted_file_error(cmd_args: list[str], todo_file: Path, capsys: pytest.CaptureFixture[str]):
+    todo_file.write_text("{not json", encoding="utf-8")
+
+    ret = main(cmd_args)
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Lỗi: ")
+    assert str(todo_file) in captured.err
 
     # File hỏng không bị ghi đè hay sửa
     assert todo_file.read_text(encoding="utf-8") == "{not json"
@@ -372,4 +399,38 @@ def test_subprocess_task6_flow(tmp_path: Path):
     )
     assert res.returncode == 0
     assert "Đã xoá 1 công việc đã hoàn thành." in res.stdout
+
+
+def test_readme_exists_and_contains_required_strings():
+    repo_root = Path(__file__).resolve().parent.parent
+    readme_path = repo_root / "README.md"
+    assert readme_path.exists(), "README.md không tồn tại ở thư mục gốc repo"
+
+    content = readme_path.read_text(encoding="utf-8")
+    required_strings = [
+        "TODO_FILE",
+        "--file",
+        "clear",
+        ".venv/bin/python -m pytest -q",
+    ]
+    for s in required_strings:
+        assert s in content, f"Chuỗi '{s}' không có trong README.md"
+
+
+def test_subprocess_corrupted_file(tmp_path: Path):
+    path = tmp_path / "corrupted_todo.json"
+    path.write_text("{not json", encoding="utf-8")
+    repo_root = Path(__file__).resolve().parent.parent
+
+    res = subprocess.run(
+        [sys.executable, "-m", "todo", "--file", str(path), "list"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert res.returncode == 1
+    assert res.stderr.startswith("Lỗi: ")
+    assert str(path) in res.stderr
+    assert path.read_text(encoding="utf-8") == "{not json"
+
 

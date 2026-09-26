@@ -127,3 +127,21 @@
     - Thêm test `test_invalid_id_type_argparse`: kiểm tra `done abc`, `undone abc`, `edit abc x`, `delete abc` bị argparse chặn lại và raise `SystemExit` mã 2 (dùng `pytest.mark.parametrize`).
     - Thêm test `test_subprocess_task6_flow`: kiểm tra end-to-end chuỗi lệnh thực thi thực tế qua subprocess từ dòng lệnh (`add` -> `edit` -> `done` -> `undone` -> `done` -> `clear`).
   - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 109 tests đều pass.
+
+## Task 7: Xử lý file JSON hỏng ở CLI và README
+- **Trạng thái**: Hoàn thành
+- **Các việc đã làm**:
+  - Tạo [README.md](file:///Users/thai/project4fun/automaticWorkFlow/README.md) bằng tiếng Việt với đầy đủ các nội dung:
+    - Mô tả tổng quan về ứng dụng todo-cli.
+    - Yêu cầu hệ thống: Python ≥ 3.10, không có dependency bên ngoài khi chạy (chỉ dùng pytest cho dev).
+    - Hướng dẫn cài đặt và thiết lập môi trường ảo venv cùng pytest (`python3 -m venv .venv`, `.venv/bin/python -m pip install -q "pytest>=7"`).
+    - Hướng dẫn cấu hình đường dẫn file dữ liệu theo thứ tự ưu tiên: tuỳ chọn toàn cục `--file`, biến môi trường `TODO_FILE`, mặc định `~/.todo.json` (hỗ trợ mở rộng `~`).
+    - Bảng hướng dẫn chi tiết các lệnh (`add`, `list [--pending|--done]`, `done`, `undone`, `edit`, `delete`, `clear`) kèm cú pháp, mô tả và ví dụ cụ thể.
+    - Hướng dẫn chạy kiểm thử bằng đúng lệnh `.venv/bin/python -m pytest -q`.
+  - Cập nhật [tests/test_cli.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/test_cli.py):
+    - Cập nhật `test_corrupted_file_error`: kiểm tra `main(["list"])` và `main(["add", "x"])` khi file dữ liệu JSON hỏng đều trả về mã 1, stderr bắt đầu bằng `Lỗi: ` và chứa đường dẫn file, nội dung file hỏng không bị ghi đè hay sửa đổi.
+    - Thêm test `test_all_commands_corrupted_file_error`: dùng `pytest.mark.parametrize` kiểm tra tất cả các lệnh (`list`, `list --pending`, `list --done`, `add x`, `done 1`, `undone 1`, `edit 1 y`, `delete 1`, `clear`) trên file JSON hỏng đều trả về mã 1, in `Lỗi: ` kèm đường dẫn file ra stderr và bảo toàn nguyên vẹn file hỏng.
+    - Thêm test `test_readme_exists_and_contains_required_strings`: kiểm tra file `README.md` tồn tại ở thư mục gốc repo và chứa đầy đủ các chuỗi bắt buộc: `TODO_FILE`, `--file`, `clear`, `.venv/bin/python -m pytest -q`.
+    - Thêm test `test_subprocess_corrupted_file`: kiểm tra end-to-end qua subprocess khi file dữ liệu hỏng trả về mã 1, stderr in thông báo lỗi kèm đường dẫn file và nội dung file hỏng không đổi.
+  - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 120 tests đều pass.
+
