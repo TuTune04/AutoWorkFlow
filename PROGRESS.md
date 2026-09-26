@@ -45,3 +45,37 @@
     - Kiểm tra xử lý file không phải UTF-8 hợp lệ raise `StorageError` có chứa đường dẫn file.
   - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 58 tests đều pass.
 
+## Task 4: Logic nghiệp vụ (`service.py`)
+- **Trạng thái**: Hoàn thành
+- **Các việc đã làm**:
+  - Cập nhật [todo/service.py](file:///Users/thai/project4fun/automaticWorkFlow/todo/service.py):
+    - Định nghĩa ngoại lệ `TodoError(Exception)` biểu diễn lỗi nghiệp vụ.
+    - Triển khai lớp `TodoList`:
+      - `__init__(self, path: pathlib.Path)`: lưu đường dẫn `self.path`, gọi `load_tasks` để `StorageError` lan ra ngoài nếu dữ liệu lưu trữ bị lỗi/hỏng; khởi tạo cấu trúc map task theo id.
+      - Property `tasks -> list[Task]`: trả về bản sao danh sách và bản sao từng `Task` (dùng `dataclasses.replace`) theo thứ tự `id` tăng dần, chỉnh sửa các phần tử hay list trả về không làm thay đổi dữ liệu nội bộ.
+      - Phương thức `_commit(self, new_tasks: dict[int, Task]) -> None`: lưu trạng thái mới ra file (`save_tasks`) trước, chỉ khi thành công mới cập nhật `self._tasks` trong bộ nhớ; nếu lưu thất bại trạng thái bộ nhớ được giữ nguyên (rollback).
+      - `_get(self, task_id: int) -> Task`: lấy object nội bộ dùng cho các thao tác nội bộ.
+      - `get(task_id: int) -> Task`: tìm và trả về bản sao `Task` theo id; raise `TodoError(f"Không tìm thấy công việc #{task_id}")` nếu không tồn tại.
+      - `add(title: str) -> Task`: loại bỏ khoảng trắng thừa hai đầu (`strip()`), raise `TodoError("Tiêu đề không được rỗng")` nếu rỗng; gán `id = max(id hiện có, default=0) + 1`, `created_at=now_iso()`; gọi `_commit` lưu file trước khi cập nhật bộ nhớ và trả về bản sao `Task` mới tạo.
+      - `complete(task_id: int) -> Task`: tạo bản sao với `done=True`, gọi `_commit` lưu file và trả về bản sao `Task`.
+      - `uncomplete(task_id: int) -> Task`: tạo bản sao với `done=False`, gọi `_commit` lưu file và trả về bản sao `Task`.
+      - `edit(task_id: int, new_title: str) -> Task`: kiểm tra task tồn tại, loại bỏ khoảng trắng tiêu đề mới, raise `TodoError("Tiêu đề không được rỗng")` nếu rỗng, tạo bản sao với tiêu đề mới, gọi `_commit` lưu file và trả về bản sao `Task`.
+      - `delete(task_id: int) -> Task`: gọi `_commit` lưu trạng thái mới đã bỏ task, và trả về bản sao `Task` đã xoá.
+      - `clear_done() -> int`: gọi `_commit` xoá tất cả các công việc có `done=True`, và trả về số lượng công việc đã xoá.
+      - `filter(status: str) -> list[Task]`: lọc theo trạng thái `"all"`, `"pending"`, `"done"`, raise `ValueError` nếu trạng thái không hợp lệ; trả về danh sách các bản sao `Task`.
+  - Cập nhật [tests/test_service.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/test_service.py):
+    - Kiểm tra chuỗi sinh id và quy tắc max+1 (`add` 3 lần -> 1, 2, 3; `delete(2)` rồi `add` -> id 4).
+    - Kiểm tra `add` với chuỗi rỗng / toàn khoảng trắng raise `TodoError("Tiêu đề không được rỗng")`, và chuỗi có khoảng trắng hai đầu được strip chuẩn xác.
+    - Kiểm tra các thao tác `complete`, `uncomplete`, `edit`, `delete`, `get` với id không tồn tại đều raise `TodoError` bằng `pytest.mark.parametrize`.
+    - Kiểm tra tính bền vững của dữ liệu qua nhiều instance `TodoList(path)` độc lập sau mỗi thao tác thêm, sửa, đổi trạng thái, xoá và dọn dẹp task.
+    - Kiểm tra hàm `clear_done` trả đúng số lượng task đã xoá, dọn dẹp sạch các task `done=True` và giữ lại task chưa hoàn thành.
+    - Kiểm tra hàm `filter` với `"all"`, `"pending"`, `"done"` và raise `ValueError` với giá trị không hợp lệ.
+    - Kiểm tra `tasks` property trả về bản sao danh sách độc lập, sắp xếp tăng dần theo id.
+    - Kiểm tra `__init__` để `StorageError` lan ra ngoài khi file JSON hỏng.
+    - Kiểm tra hỗ trợ unicode tiếng Việt có dấu và kiểu trả về của các phương thức.
+    - Kiểm tra `test_tasks_items_are_copies`: đảm bảo `todo.tasks` và `todo.get(id)` trả về các bản sao độc lập, thay đổi thuộc tính trên object trả về không làm thay đổi dữ liệu nội bộ.
+    - Kiểm tra `test_state_unchanged_when_save_fails`: kiểm tra tính toàn vẹn và rollback trạng thái trong bộ nhớ cho các thao tác `add`, `complete`, `edit`, `delete`, `clear_done` khi `save_tasks` ném lỗi ngoại lệ (`OSError`).
+  - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 80 tests đều pass.
+
+
+
