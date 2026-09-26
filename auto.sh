@@ -56,8 +56,10 @@ TOTAL=$(grep -cE '^## Task [0-9]+' PLAN.md || true)
 echo "📋 $TOTAL task — lệnh test: $TEST_CMD"
 
 # ---- Bước 2: vòng lặp code → test → review ----
+# agy headless tự từ chối mọi lệnh ngoài allowlist trong ~/.gemini/config/config.json và dừng luôn cả lượt
+RULES="Quy tắc chạy lệnh (bắt buộc, lệnh vi phạm sẽ bị từ chối và bạn bị dừng): chỉ dùng git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which; mỗi lần chỉ chạy MỘT lệnh, không nối lệnh bằng ; && || | hay \$(...); không dùng cd, rm, cat, echo. Tạo/sửa file bằng công cụ ghi file, đọc file bằng công cụ đọc file."
 for N in $(seq 1 "$TOTAL"); do
-  PROMPT="Đọc PLAN.md và làm DUY NHẤT Task $N. Không làm các task khác, không sửa PLAN.md. Sau khi code xong chạy: $TEST_CMD và sửa cho đến khi pass. Ghi tóm tắt việc đã làm vào PROGRESS.md."
+  PROMPT="Đọc PLAN.md và làm DUY NHẤT Task $N. Không làm các task khác, không sửa PLAN.md. Sau khi code xong chạy: $TEST_CMD và sửa cho đến khi pass. Ghi tóm tắt việc đã làm vào PROGRESS.md. $RULES"
 
   for TRY in $(seq 1 "$MAX_TRIES"); do
     echo "▶️  Task $N/$TOTAL — lần $TRY"
@@ -106,7 +108,7 @@ Không gọi được Claude để review.")
       echo "⛔ Dừng tại Task $N. Xem REVIEW.md và $LOG_DIR/"
       exit 1
     fi
-    PROMPT="Task $N chưa đạt. Đọc REVIEW.md và PLAN.md, sửa đúng các lỗi được liệt kê cho Task $N, không làm task khác. Chạy lại: $TEST_CMD."
+    PROMPT="Task $N chưa đạt. Đọc REVIEW.md và PLAN.md, sửa đúng các lỗi được liệt kê cho Task $N, không làm task khác. Chạy lại: $TEST_CMD. $RULES"
   done
 done
 
