@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-CODER="${CODER:-gemini}"      # đổi thành agy khi Antigravity CLI hết lỗi headless
+CODER="${CODER:-agy}"         # Antigravity CLI (quyền lấy từ ~/.gemini/config/config.json)
 MAX_TRIES="${MAX_TRIES:-3}"   # số vòng sửa tối đa cho mỗi task
 LOG_DIR=".auto-logs"
 
@@ -15,13 +15,15 @@ need()   { command -v "$1" >/dev/null || { echo "❌ Thiếu '$1'. $2"; exit 1; 
 
 need git    "Cài: xcode-select --install"
 need claude "Cài: curl -fsSL https://claude.ai/install.sh | bash"
-need "$CODER" "Cài: brew install gemini-cli"
+need "$CODER" "Cài Antigravity CLI (agy) trước"
 
 if [ ! -f PLAN.md ] && [ $# -lt 1 ]; then
   echo "Cách dùng: ./auto.sh \"mô tả dự án\""; exit 1
 fi
 mkdir -p "$LOG_DIR"
 grep -qx "$LOG_DIR/" .gitignore 2>/dev/null || echo "$LOG_DIR/" >> .gitignore
+grep -qx "REVIEW.md" .gitignore 2>/dev/null || echo "REVIEW.md" >> .gitignore
+git rm -q --cached --ignore-unmatch REVIEW.md 2>/dev/null || true
 
 # ---- Git: làm trên branch riêng để dễ bỏ nếu kết quả tệ ----
 [ -d .git ] || git init -q
@@ -59,7 +61,14 @@ for N in $(seq 1 "$TOTAL"); do
 
   for TRY in $(seq 1 "$MAX_TRIES"); do
     echo "▶️  Task $N/$TOTAL — lần $TRY"
-    "$CODER" -p "$PROMPT" --yolo > "$LOG_DIR/task$N-try$TRY-code.log" 2>&1 || true
+    "$CODER" -p "$PROMPT" < /dev/null > "$LOG_DIR/task$N-try$TRY-code.log" 2>&1 || true
+
+    # Dừng sớm nếu agent không đổi file nào (thường do bị từ chối quyền / lỗi đăng nhập)
+    if [ -z "$(git status --porcelain)" ]; then
+      notify "Agent không đổi file nào ở Task $N"
+      echo "⛔ Agent không thay đổi file nào (Task $N, lần $TRY). Xem $LOG_DIR/task$N-try$TRY-code.log"
+      exit 2
+    fi
 
     # Script tự chạy test, không tin lời báo cáo của agent
     if TEST_OUT=$(bash -c "$TEST_CMD" 2>&1); then TEST_OK=1; else TEST_OK=0; fi
