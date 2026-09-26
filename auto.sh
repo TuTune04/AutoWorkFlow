@@ -16,6 +16,8 @@
 #   MAX_TRIES=3            số vòng sửa tối đa mỗi task
 #   MAX_WAIT_HOURS=6       tổng thời gian tối đa chờ khi Claude chạm giới hạn sử dụng
 #   AGY_ALLOWED_CMDS=...   danh sách lệnh nhắc agy dùng (phải khớp allowlist trong ~/.gemini/config/config.json)
+#   AGY_ALLOW_MCP=         MCP tool agy được dùng, dạng "server/tool" (ví dụ "flutter_dart-mcp-server/dtd");
+#                          rỗng = nhắc agent không dùng MCP, chỉ dùng lệnh CLI
 # Ví dụ:
 #   REVIEW_MODEL=haiku ./auto.sh
 #   CODER=gemini ./auto.sh
@@ -56,7 +58,7 @@ need git "Cài: xcode-select --install"
 if ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then cd "$ROOT"; fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS AGY_ALLOWED_CMDS"
+CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS AGY_ALLOWED_CMDS AGY_ALLOW_MCP"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -73,9 +75,11 @@ REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
 MAX_TRIES="${MAX_TRIES:-3}"
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-6}"
 AGY_ALLOWED_CMDS="${AGY_ALLOWED_CMDS:-git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which}"
+AGY_ALLOW_MCP="${AGY_ALLOW_MCP:-}"
 # Chỉ dùng khi test: thay thời gian chờ hạn mức bằng số giây này
 AUTOWF_TEST_WAIT_SECS="${AUTOWF_TEST_WAIT_SECS:-}"
 AGY_CONFIG="${AGY_CONFIG:-$HOME/.gemini/config/config.json}"
+AGY_CONV_DIR="${AGY_CONV_DIR:-$HOME/.gemini/antigravity-cli/conversations}"
 
 LOG_DIR=".auto-logs"
 LIMIT_RE='usage limit|limit reached|rate limit|resets'
@@ -137,6 +141,11 @@ parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 
 
 # ---- Coding agent ----
 AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool."
+if [ -z "$AGY_ALLOW_MCP" ]; then
+  AGY_RULES+=" Do not use MCP tools; use CLI commands only (e.g. flutter test, flutter analyze, dart format)."
+else
+  AGY_RULES+=" The only MCP tools you may use are: $AGY_ALLOW_MCP. For everything else use CLI commands."
+fi
 CODER_RC=0
 
 run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CODER_RC
@@ -167,14 +176,53 @@ cmd_rule()     { printf 'command(regex:^%s( [^;&|`$]*)?$)' "$(printf '%s' "$1" |
 agy_last_command() {
   local db
   command -v sqlite3 >/dev/null || return 0
-  db=$(find "$HOME/.gemini/antigravity-cli/conversations" -name '*.db' -newer "$LOG_DIR/.coder-start" 2>/dev/null | head -n1 || true)
+  db=$(agy_new_conversation)
   [ -n "$db" ] || return 0
   sqlite3 "$db" "select step_payload from steps order by idx desc limit 4" 2>/dev/null | strings \
     | grep -oE '"CommandLine":"[^"]*"' | head -n1 | sed -E 's/^"CommandLine":"//; s/"$//; s/\\u003e/>/g; s/\\u003c/</g; s/\\u0026/\&/g' || true
 }
 
+# Conversation agy mới nhất được ghi sau lần gọi agent cuối, rỗng nếu không có
+agy_new_conversation() {
+  local db
+  db=$(find "$AGY_CONV_DIR" -name '*.db' -newer "$LOG_DIR/.coder-start" 2>/dev/null | head -n1 || true)
+  [ -z "$db" ] || ls -t "$AGY_CONV_DIR"/*.db 2>/dev/null | head -n1 || true
+}
+
+mcp_items() { printf '%s\n' "$AGY_ALLOW_MCP" | tr ', ' '\n\n' | { grep -v '^$' || true; }; }
+
+# "server/tool" của lời gọi MCP bị từ chối: tìm trong log (mcp(...) hoặc cặp server/tool),
+# không có thì tra conversation agy mới nhất; rỗng nếu không tìm được
+mcp_denied_target() {
+  local f="$1" t srv tl db payload
+  t=$(grep -oE 'mcp\([^)<>[:space:]]+/[^)<>[:space:]]+\)' "$f" 2>/dev/null | head -n1 | sed -E 's/^mcp\((.*)\)$/\1/' || true)
+  if [ -z "$t" ]; then  # "... tool dtd on server flutter_dart-mcp-server"
+    t=$(grep -oiE 'tool[ :=]+"?[A-Za-z0-9_.-]+"? (on|from|of) (the )?server[ :=]+"?[A-Za-z0-9_.-]+' "$f" 2>/dev/null | head -n1 \
+      | sed -E 's/^[Tt][Oo][Oo][Ll][ :=]+"?([A-Za-z0-9_.-]+)"? [A-Za-z]+ ([Tt][Hh][Ee] )?[Ss][Ee][Rr][Vv][Ee][Rr][ :=]+"?([A-Za-z0-9_.-]+)$/\3\/\1/' || true)
+  fi
+  if [ -z "$t" ]; then  # "MCP flutter_dart-mcp-server/dtd"
+    t=$(grep -oiE '(^|[[:space:]])mcp[[:space:]:]+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$f" 2>/dev/null | head -n1 | sed -E 's/^.*[[:space:]:]//' || true)
+  fi
+  if [ -z "$t" ]; then
+    srv=$(grep -oiE '"?server_?name"?[:=] ?"?[A-Za-z0-9_.-]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*[:=] ?"?//' || true)
+    tl=$(grep -oiE '"?tool_?name"?[:=] ?"?[A-Za-z0-9_.-]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*[:=] ?"?//' || true)
+    [ -z "$srv" ] || [ -z "$tl" ] || t="$srv/$tl"
+  fi
+  if [ -z "$t" ] && command -v sqlite3 >/dev/null; then
+    db=$(agy_new_conversation)
+    if [ -n "$db" ]; then
+      payload=$(sqlite3 "$db" "select step_payload from steps order by idx desc limit 4" 2>/dev/null | strings || true)
+      srv=$(printf '%s\n' "$payload" | grep -oE '"ServerName":"[^"]*"' | head -n1 | sed -E 's/^"ServerName":"//; s/"$//' || true)
+      tl=$(printf '%s\n' "$payload" | grep -oE '"ToolName":"[^"]*"' | head -n1 | sed -E 's/^"ToolName":"//; s/"$//' || true)
+      [ -z "$srv" ] || [ -z "$tl" ] || t="$srv/$tl"
+    fi
+  fi
+  printf '%s' "$t"
+}
+
 DIAG_AUTH_RE='not logged in|login required|please (log|sign) ?in|auth method|unauthenticated|authentication (failed|required)|reauthenticate|token (has )?expired|invalid_grant'
-DIAG_PERM_RE='auto-denied|cannot prompt|permission denied|not allowed by|denied by (policy|permission)'
+DIAG_PERM_RE='auto-denied|cannot prompt|permission denied|not allowed by|denied by (policy|permission)|soft-denying'
+DIAG_MCP_RE='"mcp" permission|CallMcpTool|mcp tool|mcp\([^)<>[:space:]]+/'
 DIAG_QUOTA_RE='quota|resource.?exhausted|too many requests|(status|code|error) 429|rate.?limit|usage limit|limit reached'
 DIAG_TIMEOUT_RE='timed? ?out|deadline exceeded'
 DIAG_CRASH_RE='panic:|segmentation fault|fatal error|traceback \(most recent|core dumped|unexpected error'
@@ -198,13 +246,25 @@ diagnose_agent_log() {
 
 # diag_advice <LOẠI> <bằng chứng> <file log> → cách xử lý cụ thể
 diag_advice() {
-  local type="$1" ev="$2" log="$3" tool cmd now at
+  local type="$1" ev="$2" log="$3" tool cmd now at target
   case "$type" in
     AUTH) echo "Đăng nhập lại: mở Terminal, chạy \`$ACTIVE_CODER\` và làm theo hướng dẫn đăng nhập, rồi chạy lại auto.sh." ;;
     PERMISSION)
       tool=$(printf '%s' "$ev" | sed -nE 's/.*required the "([A-Za-z_]+)" permission.*/\1/p')
-      cmd=""; [ "$tool" = write_file ] || cmd=$(agy_last_command)
-      if [ "$tool" = write_file ]; then
+      cmd=""; [ "$tool" = write_file ] || [ "$tool" = mcp ] || cmd=$(agy_last_command)
+      if [ "$tool" = mcp ] || grep -qiE "$DIAG_MCP_RE" "$log" 2>/dev/null; then
+        target=$(mcp_denied_target "$log")
+        echo "Công cụ MCP bị từ chối: ${target:-(không rõ server/tool)}"
+        if [ -z "$AGY_ALLOW_MCP" ]; then
+          echo "AGY_ALLOW_MCP đang rỗng → nên nhắc agent KHÔNG dùng MCP (ghi rõ trong phần Overview của PLAN.md: chỉ dùng lệnh CLI như flutter test, flutter analyze, dart format) thay vì cấp thêm quyền."
+          echo "Chỉ khi dự án thật sự cần MCP này: thêm AGY_ALLOW_MCP=\"${target:-<server>/<tool>}\" vào .autowf.env và quy tắc mcp(${target:-<server>/<tool>}) vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG)."
+        else
+          echo "Thêm vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG): mcp(${target:-<server>/<tool>})"
+          if [ -n "$target" ] && ! grep -qxF "$target" <<< "$(mcp_items)"; then
+            echo "và thêm '$target' vào AGY_ALLOW_MCP trong .autowf.env (hoặc nhắc agent không dùng MCP này)."
+          fi
+        fi
+      elif [ "$tool" = write_file ]; then
         echo "Thêm vào userSettings.globalPermissionGrants.allow ($AGY_CONFIG): write_file($(pwd -P))"
       elif [ -n "$cmd" ]; then
         echo "Lệnh bị từ chối: $cmd"
@@ -228,7 +288,7 @@ diag_advice() {
 # ---- Preflight quyền ----
 preflight_hash() {
   local h="shasum -a 256"; command -v shasum >/dev/null || h=sha256sum
-  { printf '%s\n' "$CODER" "$AGY_ALLOWED_CMDS" "${TEST_CMD:-}"; cat "$AGY_CONFIG" 2>/dev/null || true; } | $h | cut -d' ' -f1
+  { printf '%s\n' "$CODER" "$AGY_ALLOWED_CMDS" "$AGY_ALLOW_MCP" "${TEST_CMD:-}"; cat "$AGY_CONFIG" 2>/dev/null || true; } | $h | cut -d' ' -f1
 }
 preflight_cached() { [ -f "$LOG_DIR/preflight.ok" ] && grep -qxF "hash=$(preflight_hash)" "$LOG_DIR/preflight.ok"; }
 
@@ -274,6 +334,16 @@ run_preflight() {
         echo "  ✅ Lệnh $c ($probe) — ĐẠT"
       fi
     done < <(allowed_cmds)
+
+    # MCP được phép: quy tắc mcp(server/tool) phải có sẵn trong config.json
+    while IFS= read -r c; do
+      if grep -qF "\"mcp($c)\"" "$AGY_CONFIG" 2>/dev/null; then
+        echo "  ✅ MCP $c — có quy tắc trong config.json"
+      else
+        echo "  ❌ MCP $c — chưa có quy tắc mcp($c) trong config.json"
+        fails+="❌ MCP $c — chưa có quy tắc trong $AGY_CONFIG"$'\n'; rules+="mcp($c)"$'\n'; ok=0
+      fi
+    done < <(mcp_items)
   fi
 
   log="$LOG_DIR/preflight-write.log"
