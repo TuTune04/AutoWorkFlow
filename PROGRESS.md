@@ -26,3 +26,22 @@
     - Kiểm tra raise `ValueError` đối với các trường hợp dữ liệu sai bằng `pytest.mark.parametrize`.
     - Kiểm tra `now_iso()` parse được bằng `datetime.fromisoformat` và có `tzinfo` khác `None`.
   - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 32 tests đều pass.
+
+## Task 3: Lưu trữ JSON (`storage.py`)
+- **Trạng thái**: Hoàn thành
+- **Các việc đã làm**:
+  - Tạo [todo/storage.py](file:///Users/thai/project4fun/automaticWorkFlow/todo/storage.py):
+    - Định nghĩa ngoại lệ `StorageError(Exception)`.
+    - Triển khai hàm `load_tasks(path: pathlib.Path) -> list[Task]`: trả về `[]` nếu file không tồn tại hoặc rỗng/chỉ chứa khoảng trắng; raise `StorageError` (kèm đường dẫn file trong thông điệp) nếu JSON không hợp lệ, không phải object, thiếu trường `tasks`, `tasks` không phải danh sách, phần tử không hợp lệ với `Task.from_dict`, hoặc trùng lặp `id`.
+    - Triển khai hàm `save_tasks(path: pathlib.Path, tasks: list[Task]) -> None`: tự động tạo thư mục cha (`parents=True, exist_ok=True`); ghi nguyên tử qua file tạm (`tempfile.NamedTemporaryFile` cùng thư mục cha, `flush` + `os.fsync`, `os.replace`); dọn dẹp file tạm nếu xảy ra lỗi; định dạng `{"version": 1, "tasks": [...]}` với `ensure_ascii=False, indent=2`, UTF-8 và kết thúc bằng newline.
+  - Tạo [tests/test_storage.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/test_storage.py):
+    - Kiểm tra `load_tasks` với file không tồn tại trả về `[]` và không tạo file.
+    - Kiểm tra file 0 byte và file chỉ chứa khoảng trắng trả về `[]`.
+    - Kiểm tra round-trip save và load với tiếng Việt có dấu, file thô không chứa ký tự escape `\u`, kết thúc bằng newline, và cấu trúc version/tasks hợp lệ.
+    - Kiểm tra `save_tasks` tự động tạo cây thư mục cha khi chưa tồn tại.
+    - Kiểm tra sau khi save không còn file tạm nào trong thư mục.
+    - Kiểm tra cơ chế dọn dẹp file tạm khi thao tác lưu gặp sự cố (mock `os.replace`).
+    - Kiểm tra `StorageError` và thông điệp chứa đường dẫn file đối với các trường hợp file hỏng (JSON lồng quá sâu, sai định dạng, id trùng) bằng `pytest.mark.parametrize`.
+    - Kiểm tra xử lý file không phải UTF-8 hợp lệ raise `StorageError` có chứa đường dẫn file.
+  - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 58 tests đều pass.
+
