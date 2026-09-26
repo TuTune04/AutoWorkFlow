@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import sys
+from typing import Optional, Union
+
+from todo import __version__
+from todo.service import TodoError, TodoList
+from todo.storage import StorageError
+
+
+def resolve_path(cli_file: Optional[Union[str, Path]] = None) -> Path:
+    """Xác định đường dẫn file dữ liệu todo.
+
+    Thứ tự ưu tiên:
+    1. Tham số cli_file (--file) nếu có.
+    2. Biến môi trường TODO_FILE nếu có.
+    3. Mặc định: Path.home() / ".todo.json".
+
+    Mở rộng '~' bằng expanduser().
+    """
+    if cli_file is not None:
+        return Path(cli_file).expanduser()
+    env_file = os.environ.get("TODO_FILE")
+    if env_file:
+        return Path(env_file).expanduser()
+    return Path.home() / ".todo.json"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Xây dựng bộ phân tích tham số dòng lệnh cho ứng dụng todo."""
+    parser = argparse.ArgumentParser(prog="todo")
+    parser.add_argument("--file", help="Đường dẫn tới file lưu trữ dữ liệu JSON", default=None)
+    parser.add_argument("--version", action="version", version=f"todo {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Subcommand: add
+    add_parser = subparsers.add_parser("add", help="Thêm công việc mới")
+    add_parser.add_argument("title", nargs="+", help="Tiêu đề công việc")
+
+    # Subcommand: list
+    list_parser = subparsers.add_parser("list", help="Liệt kê danh sách công việc")
+    list_group = list_parser.add_mutually_exclusive_group()
+    list_group.add_argument("--pending", action="store_true", help="Chỉ liệt kê công việc chưa hoàn thành")
+    list_group.add_argument("--done", action="store_true", help="Chỉ liệt kê công việc đã hoàn thành")
+
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Điểm vào dòng lệnh chính của ứng dụng todo."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        path = resolve_path(args.file)
+        todo_list = TodoList(path)
+
+        if args.command == "add":
+            title = " ".join(args.title)
+            task = todo_list.add(title)
+            print(f"Đã thêm #{task.id}: {task.title}")
+            return 0
+        elif args.command == "list":
+            if args.pending:
+                status = "pending"
+            elif args.done:
+                status = "done"
+            else:
+                status = "all"
+
+            tasks = todo_list.filter(status)
+            if not tasks:
+                print("Không có công việc nào.")
+            else:
+                for t in tasks:
+                    print(f"[{'x' if t.done else ' '}] {t.id}. {t.title}")
+            return 0
+        else:
+            return 2
+    except (TodoError, StorageError) as exc:
+        print(f"Lỗi: {exc}", file=sys.stderr)
+        return 1

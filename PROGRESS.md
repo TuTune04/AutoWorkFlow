@@ -77,5 +77,32 @@
     - Kiểm tra `test_state_unchanged_when_save_fails`: kiểm tra tính toàn vẹn và rollback trạng thái trong bộ nhớ cho các thao tác `add`, `complete`, `edit`, `delete`, `clear_done` khi `save_tasks` ném lỗi ngoại lệ (`OSError`).
   - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 80 tests đều pass.
 
+## Task 5: CLI — khung, lệnh `add` và `list`
+- **Trạng thái**: Hoàn thành
+- **Các việc đã làm**:
+  - Tạo [todo/cli.py](file:///Users/thai/project4fun/automaticWorkFlow/todo/cli.py):
+    - Triển khai hàm `resolve_path(cli_file: Optional[Union[str, Path]] = None) -> Path`: ưu tiên tham số `cli_file` (`--file`) -> biến môi trường `TODO_FILE` -> đường dẫn mặc định `Path.home() / ".todo.json"`. Hỗ trợ mở rộng `~` bằng `expanduser()`.
+    - Triển khai hàm `build_parser() -> argparse.ArgumentParser`: thiết lập parser với `prog="todo"`, tuỳ chọn `--file`, cờ `--version` hiển thị version dự án (`todo 0.1.0`), yêu cầu subcommand bắt buộc (`dest="command"`, `required=True`).
+    - Cấu hình subcommand `add`: nhận `title` dạng danh sách từ (`nargs="+"`), nối lại bằng dấu cách, gọi `todo_list.add(title)` và in `Đã thêm #<id>: <title>`.
+    - Cấu hình subcommand `list`: hỗ trợ hai cờ loại trừ lẫn nhau `--pending` và `--done` (mặc định hiển thị tất cả), in thông báo `Không có công việc nào.` khi danh sách rỗng, hoặc in từng công việc theo định dạng chuẩn `f"[{'x' if t.done else ' '}] {t.id}. {t.title}"`.
+    - Triển khai hàm `main(argv: Optional[list[str]] = None) -> int`: điều phối lệnh, bắt các lỗi ngoại lệ `TodoError` và `StorageError`, in thông báo lỗi `Lỗi: <msg>` ra stderr và trả về mã thoát `1`.
+  - Tạo [todo/__main__.py](file:///Users/thai/project4fun/automaticWorkFlow/todo/__main__.py): hỗ trợ thực thi module trực tiếp qua `python -m todo` và thoát mã theo kết quả trả về của hàm `main()`.
+  - Tạo [tests/conftest.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/conftest.py): cung cấp fixture `todo_file(tmp_path, monkeypatch)` trả về đường dẫn file tạm và cấu hình các biến môi trường `TODO_FILE` cùng `HOME` trỏ tới `tmp_path` để cô lập kiểm thử, không can thiệp vào file thật của người dùng.
+  - Tạo [tests/test_cli.py](file:///Users/thai/project4fun/automaticWorkFlow/tests/test_cli.py):
+    - Kiểm tra thứ tự ưu tiên của `resolve_path` (`--file` ghi đè `TODO_FILE`, `TODO_FILE` ghi đè mặc định `Path.home() / ".todo.json"`).
+    - Kiểm tra mở rộng `~` từ cả CLI arg và biến môi trường `TODO_FILE`.
+    - Kiểm tra cờ `--version` in đúng `todo 0.1.0` và thoát mã 0.
+    - Kiểm tra không truyền subcommand gây ra `SystemExit` với mã 2.
+    - Kiểm tra lệnh `add` thêm công việc thành công, in thông báo chuẩn stdout và dữ liệu được ghi vào JSON file.
+    - Kiểm tra lệnh `add` với tiêu đề rỗng/khoảng trắng trả về mã 1 và stderr bắt đầu bằng `Lỗi: `.
+    - Kiểm tra lệnh `list` với danh sách rỗng in `Không có công việc nào.`.
+    - Kiểm tra lệnh `list`, `list --pending`, `list --done` in chuẩn định dạng và lọc đúng trạng thái sau khi thêm và hoàn thành công việc.
+    - Kiểm tra lệnh `list --done` khi chưa có task nào hoàn thành in `Không có công việc nào.`.
+    - Kiểm tra truyền đồng thời `--pending` và `--done` bị từ chối với mã 2.
+    - Kiểm tra tuỳ chọn `--file` ghi đè `TODO_FILE` và ghi đúng vào file chỉ định.
+    - Kiểm tra xử lý file hỏng: lệnh `list` và `add` trả về mã 1, stderr bắt đầu bằng `Lỗi: ` và chứa đường dẫn file, nội dung file hỏng không bị ghi đè.
+    - Kiểm tra chạy subprocess qua `sys.executable -m todo --file <path> add abc` thành công với returncode 0.
+  - Chạy kiểm thử `.venv/bin/python -m pytest -q` và toàn bộ 93 tests đều pass.
+
 
 
