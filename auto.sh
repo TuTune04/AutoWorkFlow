@@ -152,6 +152,45 @@ else
 fi
 CODER_RC=0
 
+# Agent chỉ được sửa file; script tự test, review và commit "Task N".
+GIT_RULE="Do not run git commands that change the index, history or branch (git add, commit, stash, reset, checkout, switch, restore, rebase, merge, cherry-pick, push); the script stages and commits for you. Read-only git commands (status, diff, log, show) are fine."
+
+snapshot_git() {  # ghi lại trạng thái git trước khi agent chạy
+  HEAD_BEFORE=$(git rev-parse HEAD)
+  STASH_BEFORE=$(git stash list | wc -l | tr -d ' ')
+}
+
+undo_agent_git() {  # <file log> — agent tự commit: đưa thay đổi về cây làm việc; đổi branch/viết lại lịch sử/stash: dừng
+  local cur stash_now subjects
+  cur=$(git symbolic-ref -q --short HEAD || echo "(detached HEAD)")
+  if [ "$cur" != "$BRANCH" ]; then
+    T_END[N]=$(date +%s)
+    stop 2 "Agent đã rời branch $BRANCH (đang ở $cur) ở Task $N lần $TRY" \
+      "Log: $1
+Cách xử lý: xem git status / git log, quay về bằng: git checkout $BRANCH (commit hoặc stash thay đổi dở nếu có), rồi chạy lại."
+  fi
+  if [ "$(git rev-parse HEAD)" != "$HEAD_BEFORE" ]; then
+    if git merge-base --is-ancestor "$HEAD_BEFORE" HEAD; then
+      subjects=$(git log --format='%h %s' "$HEAD_BEFORE..HEAD" | tr '\n' ';')
+      echo "[auto.sh] agent tự commit ($subjects) → git reset --soft $HEAD_BEFORE để test/review/commit như thường" >> "$1"
+      echo "⚠️  Agent tự commit ở Task $N ($subjects) — đưa thay đổi về lại cây làm việc"
+      git reset -q --soft "$HEAD_BEFORE"
+    else
+      T_END[N]=$(date +%s)
+      stop 2 "Agent đã viết lại lịch sử git ở Task $N lần $TRY (HEAD trước đó $HEAD_BEFORE không còn trên branch)" \
+        "Log: $1
+Cách xử lý: tìm lại commit cũ bằng git reflog, đưa branch $BRANCH về đúng chỗ rồi chạy lại."
+    fi
+  fi
+  stash_now=$(git stash list | wc -l | tr -d ' ')
+  if [ "$stash_now" -gt "$STASH_BEFORE" ]; then
+    T_END[N]=$(date +%s)
+    stop 2 "Agent đã git stash thay đổi ở Task $N lần $TRY" \
+      "Log: $1
+Cách xử lý: git stash list; lấy lại bằng git stash pop (nếu đúng là thay đổi của Task $N), rồi chạy lại."
+  fi
+}
+
 run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CODER_RC
   CODER_RC=0
   touch "$LOG_DIR/.coder-start"
@@ -701,12 +740,13 @@ for N in $(seq 1 "$TOTAL"); do
   T_BEGIN[N]=$(date +%s); T_STATUS[N]="FAIL"; T_TRIES[N]=0
   rm -f REVIEW.md
   PREV_SIG=""
-  PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md."
+  PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md. $GIT_RULE"
 
   for TRY in $(seq 1 "$MAX_TRIES"); do
     T_TRIES[N]=$TRY
     echo "▶️  Task $N/$TOTAL — lần $TRY ($ACTIVE_CODER)"
     CODE_LOG="$LOG_DIR/task$N-try$TRY-code.log"
+    snapshot_git
     run_coder "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
 
     # Agent dự phòng khi agent chính lỗi đăng nhập/quyền
@@ -719,6 +759,8 @@ for N in $(seq 1 "$TOTAL"); do
       CODE_LOG="$LOG_DIR/task$N-try$TRY-code-$ACTIVE_CODER.log"
       run_coder "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
     fi
+
+    undo_agent_git "$CODE_LOG"
 
     # Cầu dao (a): agent không đổi file nào
     if [ -z "$(git status --porcelain)" ]; then
@@ -807,7 +849,7 @@ If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location �
         "Lỗi còn lại theo review/test lần cuối (REVIEW.md):
 $(head -n 12 REVIEW.md 2>/dev/null || true)"
     fi
-    PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Re-run: $TEST_CMD. Update PROGRESS.md."
+    PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
   done
 done
 
