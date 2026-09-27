@@ -37,7 +37,8 @@
 # (pre-commit, husky...) qua được với PATH hiện tại. Task PASS mà hook từ chối commit (sau khi đã
 # add lại file hook tự sửa) thì output hook vào REVIEW.md và tính là một vòng FAIL.
 # Mã thoát: 1 lỗi/task FAIL, 2 cầu dao, 3 quá MAX_WAIT_HOURS, 4 không review được,
-# 5 preflight (quyền hoặc git hook) chưa đạt, 6 dịch vụ trong REQUIRE_CMD không sẵn sàng.
+# 5 preflight (quyền hoặc git hook) chưa đạt, 6 dịch vụ trong REQUIRE_CMD không sẵn sàng,
+# 7 reviewer báo plan-gap (PLAN.md thiếu một quyết định — cần người quyết).
 # Góp ý không chặn của reviewer (khi PASS) được gom vào summary.md và tích luỹ ở .auto-logs/nits.md.
 # Mỗi lần chạy ghi tiến độ vào .auto-logs/run.log và tóm tắt vào .auto-logs/summary.md.
 
@@ -106,6 +107,8 @@ AGY_ALLOW_MCP="${AGY_ALLOW_MCP:-}"
 # Chỉ dùng khi test: thay thời gian chờ hạn mức bằng số giây này
 AUTOWF_TEST_WAIT_SECS="${AUTOWF_TEST_WAIT_SECS:-}"
 AGY_CONFIG="${AGY_CONFIG:-$HOME/.gemini/config/config.json}"
+# agy -p còn nạp quyền của project mặc định này (cộng thêm vào config.json)
+AGY_CLI_PROJECT="${AGY_CLI_PROJECT:-$HOME/.gemini/config/projects/default-cli-project.json}"
 AGY_CONV_DIR="${AGY_CONV_DIR:-$HOME/.gemini/antigravity-cli/conversations}"
 
 LOG_DIR=".auto-logs"
@@ -151,11 +154,21 @@ task_msg() {
   t=$(grep -m1 -E "^## Task $1:" PLAN.md 2>/dev/null | sed -E "s/^## Task $1:[[:space:]]*//; s/[[:space:]]+$//" || true)
   if [ -n "$t" ]; then printf 'Task %s: %s' "$1" "$t"; else printf 'Task %s' "$1"; fi
 }
-# Task N đã có commit sau lần sửa PLAN.md gần nhất (DONE_SUBJECTS); nhận cả "Task N" lẫn "Task N: ..."
+# Task N đã có commit kể từ khi danh sách task trong PLAN.md đổi lần cuối (DONE_SUBJECTS); nhận cả "Task N" lẫn "Task N: ..."
 task_done() { grep -qE "^Task $1(:|\$)" <<< "$DONE_SUBJECTS"; }
+# Heading '## Task N: ...' của PLAN.md ở một commit — đổi heading mới là plan mới
+plan_headings() { git show "$1:PLAN.md" 2>/dev/null | { grep -E '^## Task [0-9]+' || true; } | sed 's/[[:space:]]*$//'; }
+# PLAN_COMMIT = commit sửa PLAN.md cũ nhất mà danh sách heading vẫn như HEAD: sửa nội dung một task
+# (vd. ghi quyết định cho plan-gap) không làm các task đã commit bị làm lại; đổi danh sách task thì có.
 load_done_subjects() {
-  PLAN_COMMIT=$(git log -1 --format=%H -- PLAN.md)
+  local cur c
+  PLAN_COMMIT=""
   DONE_SUBJECTS=""
+  cur=$(plan_headings HEAD)
+  for c in $(git log --format=%H -- PLAN.md); do
+    [ "$(plan_headings "$c")" = "$cur" ] || break
+    PLAN_COMMIT=$c
+  done
   [ -z "$PLAN_COMMIT" ] || DONE_SUBJECTS=$(git log --format=%s "$PLAN_COMMIT"..HEAD)
 }
 
@@ -304,7 +317,12 @@ ask_coder() {  # <prompt> <file log> — gọi CODER với đúng prompt này (k
 allowed_cmds() { printf '%s\n' "$AGY_ALLOWED_CMDS" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | { grep -v '^$' || true; }; }
 first_exe()    { local w; for w in $1; do case "$w" in *=*) ;; *) echo "$w"; return 0 ;; esac; done; }
 # Quy tắc hẹp cho agy: chỉ lệnh này, không cho nối lệnh khác bằng ; & | ` $
-cmd_rule()     { printf 'command(regex:^%s( [^;&|`$]*)?$)' "$(printf '%s' "$1" | sed 's/[].[\*^$()+?{}|]/\\&/g')"; }
+# git: chỉ các lệnh con chỉ đọc (agent không được commit/push/reset — script làm việc đó)
+GIT_READONLY_RULE='command(regex:^git (status|diff|log|show|ls-files)( [^;&|`$]*)?$)'
+cmd_rule()     {
+  if [ "$1" = git ]; then printf '%s' "$GIT_READONLY_RULE"; return; fi
+  printf 'command(regex:^%s( [^;&|`$]*)?$)' "$(printf '%s' "$1" | sed 's/[].[\*^$()+?{}|]/\\&/g')"
+}
 
 # Lệnh gần nhất agy chạy (từ conversation mới hơn lần gọi agent cuối), rỗng nếu không tìm được
 agy_last_command() {
@@ -422,7 +440,7 @@ diag_advice() {
 # ---- Preflight quyền ----
 preflight_hash() {
   local h="shasum -a 256"; command -v shasum >/dev/null || h=sha256sum
-  { printf '%s\n' "$CODER" "$AGY_ALLOWED_CMDS" "$AGY_ALLOW_MCP" "${TEST_CMD:-}"; cat "$AGY_CONFIG" 2>/dev/null || true; } | $h | cut -d' ' -f1
+  { printf '%s\n' "$CODER" "$AGY_ALLOWED_CMDS" "$AGY_ALLOW_MCP" "${TEST_CMD:-}"; cat "$AGY_CONFIG" "$AGY_CLI_PROJECT" 2>/dev/null || true; } | $h | cut -d' ' -f1
 }
 preflight_cached() { [ -f "$LOG_DIR/preflight.ok" ] && grep -qxF "hash=$(preflight_hash)" "$LOG_DIR/preflight.ok"; }
 
@@ -578,6 +596,15 @@ run_preflight() {
       fi
     done < <(allowed_cmds)
 
+    # Quy tắc quá rộng (ở config.json hoặc project mặc định của agy -p) vô hiệu hoá các quy tắc hẹp ở trên
+    local broad
+    broad=$(cat "$AGY_CONFIG" "$AGY_CLI_PROJECT" 2>/dev/null | { grep -oE '"command\((\*|git|regex:[^^][^"]*)\)"' || true; } | sort -u)
+    if [ -n "$broad" ]; then
+      echo "  ⚠️  Có quy tắc quá rộng (agent chạy được lệnh ngoài danh sách, vd. git commit/push/reset):"
+      printf '%s\n' "$broad" | sed 's/^/       /'
+      echo "     Xoá chúng khỏi $AGY_CONFIG / $AGY_CLI_PROJECT; git chỉ cần: $GIT_READONLY_RULE"
+    fi
+
     # MCP được phép: quy tắc mcp(server/tool) phải có sẵn trong config.json
     while IFS= read -r c; do
       if grep -qF "\"mcp($c)\"" "$AGY_CONFIG" 2>/dev/null; then
@@ -684,13 +711,13 @@ if [ -n "$ADOPT" ]; then
   git rev-parse -q --verify HEAD >/dev/null || { echo "❌ Repo chưa có commit nào"; exit 1; }
   load_done_subjects
   MSG=$(task_msg "$ADOPT")
-  if task_done "$ADOPT"; then echo "ℹ️  Task $ADOPT đã có commit sau lần sửa PLAN.md gần nhất — không cần làm gì"; exit 0; fi
+  if task_done "$ADOPT"; then echo "ℹ️  Task $ADOPT đã có commit kể từ khi danh sách task trong PLAN.md đổi lần cuối — không cần làm gì"; exit 0; fi
   mkdir -p "$LOG_DIR"
   LOG="$LOG_DIR/adopt-task$ADOPT.log"
   DIRTY=$(git status --porcelain -- . ":(exclude)$LOG_DIR")
   if [ -z "$DIRTY" ]; then
     OLD=$(git log -1 --format=%s)
-    if [ "$(git rev-parse HEAD)" = "$PLAN_COMMIT" ]; then echo "❌ Cây sạch và HEAD là commit sửa PLAN.md — không có gì để nhận là Task $ADOPT"; exit 1; fi
+    if [ "$(git rev-parse HEAD)" = "$(git log -1 --format=%H -- PLAN.md)" ]; then echo "❌ Cây sạch và HEAD là commit sửa PLAN.md — không có gì để nhận là Task $ADOPT"; exit 1; fi
     if grep -qE '^Task [0-9]+(:|$)' <<< "$OLD"; then echo "❌ HEAD đã là commit của task khác ('$OLD') — không đổi tên"; exit 1; fi
     if [ -n "$(git branch -r --contains HEAD 2>/dev/null)" ]; then echo "❌ HEAD đã được push — không đổi tên commit"; exit 1; fi
   fi
@@ -775,7 +802,7 @@ RUN_NITS=""
 # Góp ý không chặn trong review PASS (mọi dòng trừ dòng PASS) → nits.md (tích luỹ) và RUN_NITS (summary.md)
 save_nits() {  # <N> <nội dung review>
   local nits
-  nits=$(printf '%s\n' "$2" | { grep -vE '^[[:space:]#*]*PASS[[:space:]#*.]*$' || true; } | sed -e '/./,$!d')
+  nits=$(review_body "$2")
   [ -n "$(printf '%s' "$nits" | tr -d '[:space:]')" ] || return 0
   { echo "## $(task_msg "$1") — $(git rev-parse --short HEAD), $(date '+%Y-%m-%d %H:%M')"; echo; printf '%s\n' "$nits"; echo; } >> "$LOG_DIR/nits.md"
   RUN_NITS+="### $(task_msg "$1")"$'\n\n'"$nits"$'\n\n'
@@ -876,6 +903,21 @@ claude_call() {
   done
 }
 
+# Kết luận review: các dòng chỉ gồm đúng một từ PASS/FAIL (bỏ qua *, #, `, dấu chấm).
+# In PASS | FAIL | BOTH | NONE.
+parse_verdict() {
+  local v
+  v=$(printf '%s\n' "$1" | sed -E 's/[*#`.:]//g; s/^[[:space:]]+//; s/[[:space:]]+$//' | { grep -xE 'PASS|FAIL' || true; } | sort -u | tr '\n' ' ')
+  case "$v" in
+    "PASS ") echo PASS ;;
+    "FAIL ") echo FAIL ;;
+    "")      echo NONE ;;
+    *)       echo BOTH ;;
+  esac
+}
+# Nội dung review trừ các dòng kết luận PASS/FAIL
+review_body() { printf '%s\n' "$1" | { grep -vE '^[[:space:]#*`]*(PASS|FAIL)[[:space:]#*`.:]*$' || true; } | sed -e '/./,$!d'; }
+
 # Test bị lỗi: lấy vài dòng lỗi cuối, bỏ số dòng / đường dẫn tạm / thời gian để so giữa các vòng
 test_signature() {
   printf '%s\n' "$1" | { grep -v '^[[:space:]]*$' || true; } | tail -n 5 | sed -E \
@@ -903,7 +945,7 @@ fi
 
 load_plan || stop 1 "PLAN.md không hợp lệ: $PLAN_ERR"
 echo "📋 $TOTAL task — lệnh test: $TEST_CMD"
-# Chỉ tính "Task N" commit sau lần sửa PLAN.md gần nhất (task của plan cũ đã merge không được tính)
+# Chỉ tính "Task N" commit kể từ lần cuối danh sách heading task trong PLAN.md thay đổi (task của plan cũ đã merge không được tính)
 load_done_subjects
 
 # ---- Preflight quyền (bỏ qua nếu cấu hình không đổi kể từ lần đạt trước) ----
@@ -1009,7 +1051,13 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
 
     REVIEW_IN="$LOG_DIR/task$N-try$TRY-review-input.txt"
     REVIEW_OUT="$LOG_DIR/task$N-try$TRY-review.md"
+    PREV_REVIEW=""
+    if [ "$TRY" -gt 1 ] && [ -f REVIEW.md ]; then PREV_REVIEW=$(cat REVIEW.md); fi
     {
+      if [ -n "$PREV_REVIEW" ]; then
+        echo "=== PREVIOUS REVIEW OF TASK $N (try $((TRY - 1)); the coder was asked to fix exactly these items) ==="
+        echo "$PREV_REVIEW"; echo
+      fi
       echo "=== PLAN.md (overview + Task $N) ==="; echo "$PLAN_PART"
       echo; echo "=== TEST RESULTS (command: $TEST_CMD, pass=$TEST_OK, last 60 lines) ==="; echo "$TEST_OUT"
       echo; echo "=== CHANGED FILES (git diff --stat) ==="; echo "$DIFF_STAT"
@@ -1017,21 +1065,35 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
     } > "$REVIEW_IN"
 
     echo "🔍 Claude ($REVIEW_MODEL) đang review..."
-    claude_call "$REVIEW_IN" "$REVIEW_OUT" -p --model "$REVIEW_MODEL" "You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
-PLAN.md is fixed and approved: never ask to edit PLAN.md; judge the code against it. If the diff is marked TRUNCATED, read the files listed as not shown from the working tree before judging, and never FAIL only because a file is missing from the truncated diff.
-Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL.
-If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix'.
-If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted '- nit: file:location — suggestion'. Do not paste long code." \
+    REVIEW_PROMPT="You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
+PLAN.md is fixed and approved: never ask the coder to edit PLAN.md; judge the code against it. If the diff is marked TRUNCATED, read the files listed as not shown from the working tree before judging, and never FAIL only because a file is missing from the truncated diff.
+If a PREVIOUS REVIEW section is present, first check every item in it: FAIL if any is still not fixed. For a problem it did not raise, FAIL only if it is a real bug, a security issue or a failing test; anything else is a nit.
+If passing would need a decision PLAN.md does not make (behaviour, scope or requirement the plan does not specify), do not invent it and do not ask the coder to guess: write '- plan-gap: <what PLAN.md does not say> — <options>'. A plan-gap line in a FAIL stops the run for a human decision.
+Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL — and write that word on no other line.
+If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix' (or '- plan-gap: ...').
+If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted '- nit: file:location — suggestion'. Do not paste long code."
+    REVIEW_ARGS=(-p --model "$REVIEW_MODEL" "$REVIEW_PROMPT")
+    claude_call "$REVIEW_IN" "$REVIEW_OUT" "${REVIEW_ARGS[@]}" \
       || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
 
     VERDICT=$(cat "$REVIEW_OUT")
-    FIRST=$(printf '%s' "${VERDICT%%$'\n'*}" | tr -d '[:space:]*#')
-    # Reviewer đôi khi đặt PASS/FAIL ở dòng cuối thay vì dòng đầu
-    if [ "$FIRST" != "PASS" ] && [ "$FIRST" != "FAIL" ]; then
-      FIRST=$(printf '%s\n' "$VERDICT" | { grep -v '^[[:space:]]*$' || true; } | tail -n 1 | tr -d '[:space:]*#')
+    FIRST=$(parse_verdict "$VERDICT")
+    if [ "$FIRST" = NONE ]; then
+      echo "⚠️  Review Task $N không có dòng PASS/FAIL riêng — gọi review lại một lần"
+      mv "$REVIEW_OUT" "$REVIEW_OUT.no-verdict"
+      claude_call "$REVIEW_IN" "$REVIEW_OUT" "${REVIEW_ARGS[@]}" \
+        || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
+      VERDICT=$(cat "$REVIEW_OUT")
+      FIRST=$(parse_verdict "$VERDICT")
+      if [ "$FIRST" = NONE ]; then echo "⚠️  Review lại vẫn không có PASS/FAIL — tính là FAIL"; FIRST=FAIL; fi
     fi
+    if [ "$FIRST" = BOTH ]; then
+      echo "⚠️  Review Task $N có cả dòng PASS lẫn FAIL — tính là FAIL (xem $REVIEW_OUT)"
+      FIRST=FAIL
+    fi
+    PLAN_GAPS=$(printf '%s\n' "$VERDICT" | { grep -E '^[[:space:]]*[-*][[:space:]]*(\*\*)?plan-gap' || true; })
 
-    if [ "$FIRST" = "PASS" ] && [ "$TEST_OK" -eq 1 ]; then
+    if [ "$FIRST" = PASS ] && [ "$TEST_OK" -eq 1 ]; then
       rm -f REVIEW.md
       COMMIT_LOG="$LOG_DIR/task$N-try$TRY-commit.log"
       if commit_task "$(task_msg "$N")" "$COMMIT_LOG"; then
@@ -1048,9 +1110,18 @@ If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted 
       } > REVIEW.md
       echo "❌ Task $N: review PASS nhưng git hook từ chối commit (xem REVIEW.md, $COMMIT_LOG)"
     else
-      printf '%s\n' "$VERDICT" | tail -n +2 > REVIEW.md
+      review_body "$VERDICT" > REVIEW.md
       if [ "$TEST_OK" -eq 0 ]; then printf '\n- Tests are FAILING (last lines):\n%s\n' "$TEST_OUT" >> REVIEW.md; fi
       echo "❌ Task $N chưa đạt (xem REVIEW.md)"
+      if [ -n "$PLAN_GAPS" ]; then
+        T_END[N]=$(date +%s)
+        stop 7 "Reviewer báo PLAN.md thiếu quyết định cho Task $N (plan-gap) — dừng để người quyết" \
+          "$PLAN_GAPS
+Review: $REVIEW_OUT
+Cách xử lý: ghi quyết định vào phần Task $N trong PLAN.md (giữ nguyên các heading '## Task N: ...'), commit riêng PLAN.md,
+bỏ phần làm dở (git stash -u) rồi chạy lại autowf — sửa nội dung task không làm các task đã commit bị làm lại.
+Hoặc sửa tay theo quyết định rồi: autowf --adopt $N"
+      fi
     fi
 
     if [ "$TRY" -eq "$MAX_TRIES" ]; then
