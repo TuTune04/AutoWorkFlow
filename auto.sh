@@ -16,7 +16,7 @@
 #   PLAN_MODEL=opus        model Claude viết PLAN.md
 #   REVIEW_MODEL=sonnet    model Claude review
 #   MAX_TRIES=3            số vòng sửa tối đa mỗi task
-#   MAX_WAIT_HOURS=6       tổng thời gian tối đa chờ khi Claude chạm giới hạn sử dụng
+#   MAX_WAIT_HOURS=6       tổng thời gian tối đa chờ khi Claude hoặc coding agent chạm giới hạn sử dụng
 #   AGY_ALLOWED_CMDS=...   danh sách lệnh nhắc agy dùng (phải khớp allowlist trong ~/.gemini/config/config.json)
 #   AGY_ALLOW_MCP=         MCP tool agy được dùng, dạng "server/tool" (ví dụ "flutter_dart-mcp-server/dtd");
 #                          rỗng = nhắc agent không dùng MCP, chỉ dùng lệnh CLI
@@ -155,6 +155,14 @@ parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 
   local t h m since target
   t=$(grep -oE '\|[0-9]{10}' "$1" | head -n1 | tr -d '|' || true)
   if [ -n "$t" ] && [ "$t" -gt "$2" ]; then echo "$t"; return 0; fi
+  # Dạng thời lượng: "Resets in 2h7m8s", "try again in 45m"
+  t=$(grep -oiE '(resets|try again) in ([0-9]+ ?h)? ?([0-9]+ ?m)? ?([0-9]+ ?s)?' "$1" | head -n1 | tr 'A-Z' 'a-z' | tr -d ' ' || true)
+  if [ -n "$t" ]; then
+    h=$(printf '%s' "$t" | sed -nE 's/.*in([0-9]+)h.*/\1/p'); m=$(printf '%s' "$t" | sed -nE 's/.*[a-z]([0-9]+)m.*/\1/p')
+    since=$(printf '%s' "$t" | sed -nE 's/.*[a-z]([0-9]+)s$/\1/p')
+    target=$(( 10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${since:-0} ))
+    if [ "$target" -gt 0 ]; then echo $(( $2 + target )); return 0; fi
+  fi
   t=$(grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})? ?(am|pm)?' "$1" | head -n1 | tr 'A-Z' 'a-z' || true)
   [ -n "$t" ] || return 1
   t=$(printf '%s' "$t" | sed -E 's/^resets( at)? //')
@@ -228,6 +236,42 @@ run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CO
     gemini) gemini -p "$2" --yolo ;;
     *)      "$1" -p "$2" ;;
   esac < /dev/null > "$3" 2>&1 || CODER_RC=$?
+}
+
+# Chỉ coi là hết quota khi agent thoát lỗi VÀ cuối log có thông báo quota rõ ràng — tránh nhầm với
+# nội dung code (vd. task làm rate limit có chữ "429"/"rate limit" trong log).
+AGENT_QUOTA_RE='quota (reached|exceeded)|resource.?exhausted|usage limit|limit reached|resets in [0-9]'
+
+# run_coder_waiting <agent> <prompt> <file log> — như run_coder, nhưng agent hết quota thì ngủ tới giờ
+# reset rồi chạy lại cùng prompt; log lần hết quota giữ lại ở <log>.quota-K. Vượt MAX_WAIT_HOURS thì dừng.
+run_coder_waiting() {
+  local k=0 now reset_at wait_s msg
+  while true; do
+    run_coder "$1" "$2" "$3"
+    [ "$CODER_RC" -ne 0 ] || return 0
+    tail -n 30 "$3" 2>/dev/null | grep -qiE "$AGENT_QUOTA_RE" || return 0
+
+    k=$((k + 1)); cp "$3" "$3.quota-$k"
+    now=$(date +%s)
+    if reset_at=$(parse_reset_time "$3" "$now"); then
+      wait_s=$((reset_at - now + 120)); msg="reset lúc $(fmt_time "$reset_at") + 2 phút"
+    else
+      wait_s=1800; msg="không đọc được giờ reset, chờ 30 phút"
+    fi
+    if [ -n "$AUTOWF_TEST_WAIT_SECS" ]; then
+      msg="$msg — TEST: chỉ chờ ${AUTOWF_TEST_WAIT_SECS}s"; wait_s="$AUTOWF_TEST_WAIT_SECS"
+    fi
+    if [ $((WAITED_SECS + wait_s)) -gt $((MAX_WAIT_HOURS * 3600)) ]; then
+      T_END[N]=$(date +%s)
+      stop 3 "$1 hết hạn mức ở Task $N; chờ thêm sẽ vượt MAX_WAIT_HOURS=${MAX_WAIT_HOURS}h ($msg)" \
+        "Log: $3.quota-$k
+Cách xử lý: chạy lại auto.sh sau giờ reset (task đã commit được bỏ qua), tăng MAX_WAIT_HOURS, hoặc đặt FALLBACK_CODER."
+    fi
+    WAIT_COUNT=$((WAIT_COUNT + 1)); WAITED_SECS=$((WAITED_SECS + wait_s))
+    echo "⏳ $1 hết hạn mức ở Task $N ($msg). Sẽ chạy lại lúc $(fmt_time $((now + wait_s)))."
+    notify "$1 hết hạn mức, chạy lại Task $N lúc $(fmt_time $((now + wait_s)))"
+    sleep "$wait_s"
+  done
 }
 
 ask_coder() {  # <prompt> <file log> — gọi CODER với đúng prompt này (không kèm quy tắc), dùng cho preflight
@@ -349,7 +393,7 @@ diag_advice() {
     QUOTA)
       now=$(date +%s)
       if at=$(parse_reset_time "$log" "$now"); then echo "Hết hạn mức phía agent: chờ tới $(fmt_time "$at") rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER)."
-      else echo "Hết hạn mức phía agent: chờ khoảng 60 phút rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER=gemini)."; fi ;;
+      else echo "Hết hạn mức phía agent: không đọc được giờ reset, chờ khoảng 30–60 phút rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER)."; fi ;;
     TIMEOUT)   echo "Agent chạy quá thời gian: chia Task này nhỏ hơn trong PLAN.md hoặc chạy lại auto.sh." ;;
     CRASH)     echo "Agent thoát bất thường: xem log, thử cập nhật agent (\`$ACTIVE_CODER update\`) rồi chạy lại auto.sh." ;;
     NO_ACTION) echo "Agent chạy xong nhưng không sửa file nào: đọc log xem nó hiểu sai gì, làm rõ Task trong PLAN.md rồi chạy lại." ;;
@@ -694,7 +738,7 @@ write_summary() {
     echo "- Bắt đầu: $(fmt_time "$RUN_START"), tổng thời gian: $(fmt_dur $(($(date +%s) - RUN_START)))"
     echo "- Branch: $BRANCH"
     echo "- Coding agent: $CODER${FALLBACK_NOTE:+ — $FALLBACK_NOTE}; review: $REVIEW_MODEL"
-    echo "- Số lần chờ hạn mức Claude: $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
+    echo "- Số lần chờ hạn mức (Claude/agent): $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
     echo "- Kết thúc: $STOP_REASON"
     if [ "$rc" -ne 0 ]; then
       echo
@@ -827,7 +871,7 @@ for N in $(seq 1 "$TOTAL"); do
     echo "▶️  Task $N/$TOTAL — lần $TRY ($ACTIVE_CODER)"
     CODE_LOG="$LOG_DIR/task$N-try$TRY-code.log"
     snapshot_git
-    run_coder "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
+    run_coder_waiting "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
 
     # Agent dự phòng khi agent chính lỗi đăng nhập/quyền
     if [ -n "$FALLBACK_CODER" ] && [ "$ACTIVE_CODER" != "$FALLBACK_CODER" ] && grep -qiE "$CODER_AUTH_RE" "$CODE_LOG"; then
@@ -837,7 +881,7 @@ for N in $(seq 1 "$TOTAL"); do
       FALLBACK_NOTE="chuyển sang $FALLBACK_CODER từ Task $N lần $TRY do $ACTIVE_CODER lỗi đăng nhập/quyền"
       ACTIVE_CODER="$FALLBACK_CODER"
       CODE_LOG="$LOG_DIR/task$N-try$TRY-code-$ACTIVE_CODER.log"
-      run_coder "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
+      run_coder_waiting "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
     fi
 
     undo_agent_git "$CODE_LOG"
