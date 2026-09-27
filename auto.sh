@@ -6,7 +6,7 @@
 #   ./auto.sh                 đã có PLAN.md: chạy (hoặc chạy tiếp) theo plan
 #   ./auto.sh --check         chỉ kiểm tra công cụ, PLAN.md và git rồi thoát
 #   ./auto.sh --new-branch    ép tạo branch auto/* mới thay vì làm tiếp branch auto/* hiện tại
-#   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) rồi thoát
+#   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) và git hook rồi thoát
 #
 # Biến cấu hình: đặt trong .autowf.env ở gốc repo, hoặc qua env (env được ưu tiên hơn file):
 #   CODER=agy              coding agent: agy | gemini | ...
@@ -26,8 +26,12 @@
 # Chạy tiếp: task đã có commit "Task N" trên branch hiện tại được bỏ qua.
 # Preflight quyền tự chạy trước vòng lặp task; bỏ qua nếu CODER, AGY_ALLOWED_CMDS, TEST_CMD và
 # ~/.gemini/config/config.json không đổi kể từ lần đạt trước (.auto-logs/preflight.ok).
-# Mã thoát: 1 lỗi/task FAIL, 2 cầu dao, 3 quá MAX_WAIT_HOURS, 4 không review được, 5 preflight chưa đạt.
-# Mỗi lần chạy ghi tóm tắt vào .auto-logs/summary.md.
+# Trước vòng lặp task (và trong --preflight) luôn thử commit trong worktree tạm để chắc git hook
+# (pre-commit, husky...) qua được với PATH hiện tại. Task PASS mà hook từ chối commit (sau khi đã
+# add lại file hook tự sửa) thì output hook vào REVIEW.md và tính là một vòng FAIL.
+# Mã thoát: 1 lỗi/task FAIL, 2 cầu dao, 3 quá MAX_WAIT_HOURS, 4 không review được,
+# 5 preflight (quyền hoặc git hook) chưa đạt.
+# Mỗi lần chạy ghi tiến độ vào .auto-logs/run.log và tóm tắt vào .auto-logs/summary.md.
 
 set -euo pipefail
 
@@ -302,6 +306,74 @@ probe_cmd() {  # lệnh vô hại để thử quyền của một lệnh
   esac
 }
 
+# Commit của auto.sh phải qua được git hook với PATH hiện tại (hook `language: system` gọi ruff/mypy...
+# từ PATH). Chạy trong worktree tạm để không đụng cây làm việc: `pre-commit run --all-files` (nếu dùng
+# pre-commit) rồi thử commit "Task 1". In ✅/❌; trả về 1 và đặt HOOK_REPORT nếu chưa đạt.
+check_commit_hooks() {
+  local hooks_dir h found="" wt d rc=0 log="$LOG_DIR/preflight-hooks.log" advice
+  HOOK_REPORT=""
+  mkdir -p "$LOG_DIR"
+  hooks_dir=$(git rev-parse --git-path hooks 2>/dev/null) || return 0
+  for h in pre-commit commit-msg; do
+    if [ -x "$hooks_dir/$h" ]; then found+="${found:+, }$h"; fi
+  done
+  if [ -z "$found" ]; then
+    if [ -f .pre-commit-config.yaml ]; then
+      echo "  ⚠️  Có .pre-commit-config.yaml nhưng hook chưa được cài (pre-commit install) — commit sẽ không chạy hook"
+    else
+      echo "  ✅ Không có git hook pre-commit/commit-msg"
+    fi
+    return 0
+  fi
+  if ! git rev-parse -q --verify HEAD >/dev/null; then
+    echo "  ⚠️  Có git hook ($found) nhưng repo chưa có commit nào — bỏ qua kiểm tra hook"
+    return 0
+  fi
+
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/autowf-hooks.XXXXXX")
+  if ! git worktree add -q --detach "$wt" HEAD >/dev/null 2>&1; then
+    rm -rf "$wt"
+    echo "  ⚠️  Có git hook ($found) nhưng không tạo được worktree tạm — bỏ qua kiểm tra hook"
+    return 0
+  fi
+  # Môi trường không track (venv, node_modules, husky) chỉ có ở cây chính
+  for d in .venv venv node_modules .husky/_; do
+    if [ -e "$d" ] && [ ! -e "$wt/$d" ] && [ -d "$(dirname "$wt/$d")" ]; then ln -s "$PWD/$d" "$wt/$d"; fi
+  done
+  : > "$log"
+  if [ -f .pre-commit-config.yaml ] && command -v pre-commit >/dev/null; then
+    echo "\$ pre-commit run --all-files" >> "$log"
+    if ! (cd "$wt" && pre-commit run --all-files) >> "$log" 2>&1; then
+      echo "[auto.sh] chạy lại sau khi hook tự sửa file" >> "$log"
+      (cd "$wt" && pre-commit run --all-files) >> "$log" 2>&1 || rc=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "\$ git commit --allow-empty -m 'Task 1'" >> "$log"
+    (cd "$wt" && git commit -q --allow-empty -m "Task 1") >> "$log" 2>&1 || rc=1
+  fi
+  for d in .venv venv node_modules .husky/_; do
+    if [ -L "$wt/$d" ]; then rm -f "$wt/$d"; fi
+  done
+  git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+  git worktree prune
+
+  if [ "$rc" -eq 0 ]; then
+    echo "  ✅ Git hook ($found) — commit thử qua được với PATH hiện tại"
+    return 0
+  fi
+  if grep -qiE 'command not found|executable .*not found|not found in PATH|No such file or directory' "$log"; then
+    advice="Hook gọi một công cụ không có trong PATH hiện tại (thường do Terminal chưa kích hoạt venv). Chạy autowf sau khi kích hoạt môi trường, vd: source .venv/bin/activate && autowf"
+  else
+    advice="Sửa các lỗi hook báo ở trên (có thể là lỗi lint sẵn có trên HEAD) rồi commit, hoặc chỉnh cấu hình hook; kiểm tra lại: autowf --preflight"
+  fi
+  echo "  ❌ Git hook ($found) — commit thử bị từ chối, commit của auto.sh cũng sẽ fail (log: $log)"
+  { grep -v '^[[:space:]]*$' "$log" || true; } | tail -n 8 | sed 's/^/     /'
+  echo "     → $advice"
+  HOOK_REPORT="❌ Git hook ($found) từ chối commit thử (log: $log)"$'\n'"$({ grep -v '^[[:space:]]*$' "$log" || true; } | tail -n 8)"$'\n'"Cách xử lý: $advice"
+  return 1
+}
+
 # In bảng ✅/❌; trả về 1 nếu có mục ❌ (quy tắc cần thêm để ở PREFLIGHT_REPORT)
 run_preflight() {
   local ok=1 rules="" fails="" c probe log d name exe
@@ -415,8 +487,11 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   need "$CODER" "Cài coding agent '$CODER' trước (mặc định: Antigravity CLI agy)"
   ACTIVE_CODER="$CODER"
   load_plan || TEST_CMD=""
-  if run_preflight; then exit 0; fi
-  exit 5
+  RC=0
+  run_preflight || RC=5
+  echo "🔎 Git hook (log: $LOG_DIR/preflight-hooks.log)"
+  check_commit_hooks || RC=5
+  exit "$RC"
 fi
 
 need claude "Cài: curl -fsSL https://claude.ai/install.sh | bash"
@@ -453,13 +528,17 @@ else
 fi
 
 mkdir -p "$LOG_DIR"
+# Ghi mọi thứ in ra Terminal vào run.log (tee bỏ qua Ctrl-C để kịp ghi dòng cuối)
+exec > >(trap '' INT; exec tee -a "$LOG_DIR/run.log") 2>&1
+echo "===== auto.sh bắt đầu $(date '+%Y-%m-%d %H:%M:%S') trên branch $BRANCH ====="
 touch .gitignore
 for line in "$LOG_DIR/" "REVIEW.md"; do
   grep -qxF "$line" .gitignore || echo "$line" >> .gitignore
 done
 git rm -q --cached --ignore-unmatch REVIEW.md >/dev/null
 if [ -n "$(git status --porcelain)" ]; then
-  git add -A && git commit -qm "auto.sh: ignore $LOG_DIR/ and REVIEW.md"
+  # Commit dọn dẹp chỉ đụng .gitignore: bỏ qua hook để lỗi hook được báo rõ ở bước kiểm tra hook bên dưới
+  git add -A && git commit -qm "auto.sh: ignore $LOG_DIR/ and REVIEW.md" --no-verify
 fi
 
 # ---- Tóm tắt cuối mỗi lần chạy ----
@@ -565,6 +644,16 @@ test_signature() {
     -e 's/(line |:)[0-9]+/\1N/g' -e 's/0x[0-9a-fA-F]+/0xN/g' -e 's/ in [0-9.]+s/ in Ns/g'
 }
 
+# git add + commit; hook (vd. pre-commit tự format) sửa file làm commit fail thì add lại và thử thêm 1 lần.
+# Output của git/hook ghi vào <file log>.
+commit_task() {  # <message> <file log>
+  git add -A
+  git commit -qm "$1" --allow-empty > "$2" 2>&1 && return 0
+  echo "[auto.sh] commit bị từ chối — add lại file hook đã sửa và thử lại" >> "$2"
+  git add -A
+  git commit -qm "$1" --allow-empty >> "$2" 2>&1
+}
+
 # ---- Bước 1: Claude viết plan ----
 if [ ! -f PLAN.md ]; then
   echo "🧠 Claude ($PLAN_MODEL) đang viết PLAN.md..."
@@ -597,6 +686,9 @@ if preflight_cached; then
 else
   run_preflight || stop 5 "Preflight quyền chưa đạt — chưa chạy task nào" "$PREFLIGHT_REPORT"
 fi
+# Hook phụ thuộc PATH của Terminal đang chạy, nên kiểm tra mỗi lần chạy (không cache)
+echo "🔎 Git hook (log: $LOG_DIR/preflight-hooks.log)"
+check_commit_hooks || stop 5 "Git hook từ chối commit thử — commit của auto.sh sẽ fail; chưa chạy task nào" "$HOOK_REPORT"
 
 # ---- Bước 2: vòng lặp code → test → review ----
 for N in $(seq 1 "$TOTAL"); do
@@ -640,7 +732,9 @@ Log: $CODE_LOG (exit code $CODER_RC)
 Cách xử lý: $(diag_advice "$DIAG_TYPE" "$DIAG_EV" "$CODE_LOG")"
     fi
 
-    # Script tự chạy test, không tin lời báo cáo của agent
+    # Script tự chạy test, không tin lời báo cáo của agent. Stage trước để hook trong TEST_CMD
+    # (vd. `pre-commit run`, chỉ xét file đã stage) thấy cả file mới — giống lúc commit.
+    git add -A
     if TEST_OUT=$(bash -c "$TEST_CMD" 2>&1); then TEST_OK=1; else TEST_OK=0; fi
     printf '%s\n' "$TEST_OUT" > "$LOG_DIR/task$N-try$TRY-test.log"
     TEST_OUT=$(printf '%s\n' "$TEST_OUT" | tail -n 60)
@@ -681,18 +775,31 @@ If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location �
 
     VERDICT=$(cat "$REVIEW_OUT")
     FIRST=$(printf '%s' "${VERDICT%%$'\n'*}" | tr -d '[:space:]*#')
+    # Reviewer đôi khi đặt PASS/FAIL ở dòng cuối thay vì dòng đầu
+    if [ "$FIRST" != "PASS" ] && [ "$FIRST" != "FAIL" ]; then
+      FIRST=$(printf '%s\n' "$VERDICT" | { grep -v '^[[:space:]]*$' || true; } | tail -n 1 | tr -d '[:space:]*#')
+    fi
 
     if [ "$FIRST" = "PASS" ] && [ "$TEST_OK" -eq 1 ]; then
       rm -f REVIEW.md
-      git add -A && git commit -qm "Task $N" --allow-empty
-      T_END[N]=$(date +%s); T_STATUS[N]="PASS"
-      echo "✅ Task $N đạt"
-      break
+      COMMIT_LOG="$LOG_DIR/task$N-try$TRY-commit.log"
+      if commit_task "Task $N" "$COMMIT_LOG"; then
+        T_END[N]=$(date +%s); T_STATUS[N]="PASS"
+        echo "✅ Task $N đạt"
+        break
+      fi
+      # Hook từ chối commit (kể cả sau khi đã add lại file hook tự sửa) → coi như một vòng FAIL
+      {
+        echo "- git commit was rejected by the repository's git hooks (pre-commit etc.). Fix every problem the hooks report below, then re-run: $TEST_CMD"
+        echo; echo "Hook output (last lines):"
+        { grep -v '^[[:space:]]*$' "$COMMIT_LOG" || true; } | tail -n 40
+      } > REVIEW.md
+      echo "❌ Task $N: review PASS nhưng git hook từ chối commit (xem REVIEW.md, $COMMIT_LOG)"
+    else
+      printf '%s\n' "$VERDICT" | tail -n +2 > REVIEW.md
+      if [ "$TEST_OK" -eq 0 ]; then printf '\n- Tests are FAILING (last lines):\n%s\n' "$TEST_OUT" >> REVIEW.md; fi
+      echo "❌ Task $N chưa đạt (xem REVIEW.md)"
     fi
-
-    printf '%s\n' "$VERDICT" | tail -n +2 > REVIEW.md
-    if [ "$TEST_OK" -eq 0 ]; then printf '\n- Tests are FAILING (last lines):\n%s\n' "$TEST_OUT" >> REVIEW.md; fi
-    echo "❌ Task $N chưa đạt (xem REVIEW.md)"
 
     if [ "$TRY" -eq "$MAX_TRIES" ]; then
       T_END[N]=$(date +%s)
