@@ -20,6 +20,7 @@
 #                          chạy trước mỗi lần thử và khi test fail; lỗi thì chờ dịch vụ, không tính là lần thử
 #   REQUIRE_WAIT_MINS=30   thời gian tối đa chờ dịch vụ trong REQUIRE_CMD sẵn sàng, quá thì dừng (exit 6)
 #   MAX_WAIT_HOURS=6       tổng thời gian tối đa chờ khi Claude hoặc coding agent chạm giới hạn sử dụng
+#   DIFF_LIMIT=120000      số byte diff tối đa gửi cho reviewer; vượt thì ghi rõ file nào bị cắt để reviewer tự đọc
 #   AGY_ALLOWED_CMDS=...   danh sách lệnh nhắc agy dùng (phải khớp allowlist trong ~/.gemini/config/config.json)
 #   AGY_ALLOW_MCP=         MCP tool agy được dùng, dạng "server/tool" (ví dụ "flutter_dart-mcp-server/dtd");
 #                          rỗng = nhắc agent không dùng MCP, chỉ dùng lệnh CLI
@@ -81,7 +82,7 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
+CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -97,6 +98,7 @@ PLAN_MODEL="${PLAN_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
 MAX_TRIES="${MAX_TRIES:-3}"
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-6}"
+DIFF_LIMIT="${DIFF_LIMIT:-120000}"
 REQUIRE_CMD="${REQUIRE_CMD:-}"
 REQUIRE_WAIT_MINS="${REQUIRE_WAIT_MINS:-30}"
 AGY_ALLOWED_CMDS="${AGY_ALLOWED_CMDS:-git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which}"
@@ -242,6 +244,15 @@ run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CO
     gemini) gemini -p "$2" --yolo ;;
     *)      "$1" -p "$2" ;;
   esac < /dev/null > "$3" 2>&1 || CODER_RC=$?
+}
+
+# PLAN.md là hợp đồng đã duyệt: agent sửa (dù reviewer gợi ý) thì khôi phục về HEAD và ghi lại diff.
+# Sửa PLAN.md còn làm auto.sh không nhận các commit "Task N" trước đó nữa.
+restore_plan() {  # <file log>
+  git diff --quiet HEAD -- PLAN.md 2>/dev/null && return 0
+  { echo "[auto.sh] agent đã sửa PLAN.md — khôi phục về HEAD. Diff bị bỏ:"; git diff HEAD -- PLAN.md; } >> "$1"
+  git checkout -q HEAD -- PLAN.md
+  echo "⚠️  Agent sửa PLAN.md ở Task $N — đã khôi phục (diff lưu trong $1)"
 }
 
 # Chỉ coi là hết quota khi agent thoát lỗi VÀ cuối log có thông báo quota rõ ràng — tránh nhầm với
@@ -939,6 +950,7 @@ for N in $(seq 1 "$TOTAL"); do
     fi
 
     undo_agent_git "$CODE_LOG"
+    restore_plan "$CODE_LOG"
 
     # Cầu dao (a): agent không đổi file nào
     if [ -z "$(git status --porcelain)" ]; then
@@ -981,7 +993,17 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
     fi
 
     git add -A
-    DIFF=$(git diff --cached HEAD -- . "${DIFF_EXCLUDES[@]}" | head -c 40000 || true)
+    DIFF_STAT=$(git diff --cached --stat=200 HEAD -- . "${DIFF_EXCLUDES[@]}" || true)
+    DIFF_BYTES=$(git diff --cached HEAD -- . "${DIFF_EXCLUDES[@]}" | wc -c | tr -d ' ')
+    DIFF=$(git diff --cached HEAD -- . "${DIFF_EXCLUDES[@]}" | head -c "$DIFF_LIMIT" || true)
+    DIFF_NOTE=""
+    if [ "$DIFF_BYTES" -gt "$DIFF_LIMIT" ]; then
+      # File có header trong phần đã gửi; file cuối cùng trong đó có thể chỉ hiện một phần
+      SHOWN=$(printf '%s\n' "$DIFF" | sed -nE 's#^diff --git a/.* b/(.*)$#\1#p')
+      NOT_SHOWN=$(git diff --cached --name-only HEAD -- . "${DIFF_EXCLUDES[@]}" | { grep -vxF -f <(printf '%s\n' "$SHOWN") || true; })
+      DIFF_NOTE="DIFF TRUNCATED: showing $DIFF_LIMIT of $DIFF_BYTES bytes. Last shown file (partial): $(printf '%s\n' "$SHOWN" | tail -n1). Files NOT shown (read them from the working tree): $(printf '%s' "$NOT_SHOWN" | tr '\n' ' ')"
+      echo "ℹ️  Diff Task $N dài $DIFF_BYTES byte > DIFF_LIMIT=$DIFF_LIMIT — reviewer được báo file nào bị cắt"
+    fi
     PLAN_PART=$(plan_excerpt "$N")
     [ -n "$PLAN_PART" ] || PLAN_PART=$(cat PLAN.md)
 
@@ -990,11 +1012,13 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
     {
       echo "=== PLAN.md (overview + Task $N) ==="; echo "$PLAN_PART"
       echo; echo "=== TEST RESULTS (command: $TEST_CMD, pass=$TEST_OK, last 60 lines) ==="; echo "$TEST_OUT"
-      echo; echo "=== GIT DIFF FOR TASK $N ==="; echo "$DIFF"
+      echo; echo "=== CHANGED FILES (git diff --stat) ==="; echo "$DIFF_STAT"
+      echo; echo "=== GIT DIFF FOR TASK $N ==="; [ -z "$DIFF_NOTE" ] || echo "$DIFF_NOTE"; echo "$DIFF"
     } > "$REVIEW_IN"
 
     echo "🔍 Claude ($REVIEW_MODEL) đang review..."
     claude_call "$REVIEW_IN" "$REVIEW_OUT" -p --model "$REVIEW_MODEL" "You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
+PLAN.md is fixed and approved: never ask to edit PLAN.md; judge the code against it. If the diff is marked TRUNCATED, read the files listed as not shown from the working tree before judging, and never FAIL only because a file is missing from the truncated diff.
 Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL.
 If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix'.
 If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted '- nit: file:location — suggestion'. Do not paste long code." \
@@ -1035,7 +1059,7 @@ If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted 
         "Lỗi còn lại theo review/test lần cuối (REVIEW.md):
 $(head -n 12 REVIEW.md 2>/dev/null || true)"
     fi
-    PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
+    PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
   done
 done
 
