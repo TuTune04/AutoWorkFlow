@@ -1001,7 +1001,7 @@ for N in $(seq 1 "$TOTAL"); do
   rm -f REVIEW.md
   PREV_SIG=""
   PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md. $GIT_RULE"
-  BASE_PROMPT="$PROMPT"; DENY_NOTE=""
+  BASE_PROMPT="$PROMPT"; DENY_NOTE=""; IDLE_STREAK=0
 
   for TRY in $(seq 1 "$MAX_TRIES"); do
     T_TRIES[N]=$TRY
@@ -1051,12 +1051,23 @@ Cách xử lý: nếu lệnh đó thật sự cần, thêm vào AGY_ALLOWED_CMDS
       T_END[N]=$(date +%s)
       DIAG=$(diagnose_agent_log "$CODE_LOG" "$CODER_RC")
       DIAG_TYPE="${DIAG%%|*}"; DIAG_EV="${DIAG#*|}"
+      # Agent thoát bình thường mà chưa làm gì (vd. chạy TEST_CMD nền rồi kết thúc lượt "sẽ chờ"):
+      # thường chỉ xảy ra một lần → chạy lại kèm nhắc nhở; lặp lại liên tiếp mới dừng.
+      IDLE_STREAK=$((IDLE_STREAK + 1))
+      if [ "$DIAG_TYPE" = NO_ACTION ] && [ "$IDLE_STREAK" -lt 2 ] && [ "$TRY" -lt "$MAX_TRIES" ]; then
+        echo "[auto.sh] agent kết thúc mà không sửa file nào (lần 1) → chạy lại kèm nhắc nhở" >> "$CODE_LOG"
+        echo "⚠️  Task $N lần $TRY: agent kết thúc mà chưa sửa file nào (\"${DIAG_EV:0:100}\") — chạy lại kèm nhắc nhở"
+        PROMPT="$BASE_PROMPT IMPORTANT: your previous run ended without changing any file; its last message was: \"${DIAG_EV:0:200}\". Do not end your turn until the task is implemented and $TEST_CMD passes. Long commands such as $TEST_CMD may continue in the background: wait for them to finish (check the command status) and read the result before ending your turn."
+        continue
+      fi
       stop 2 "Cầu dao: agent không thay đổi file nào ở Task $N (lần $TRY) — lỗi $DIAG_TYPE" \
         "Loại lỗi: $DIAG_TYPE
 Bằng chứng: ${DIAG_EV:-(log trống)}
 Log: $CODE_LOG (exit code $CODER_RC)
 Cách xử lý: $(diag_advice "$DIAG_TYPE" "$DIAG_EV" "$CODE_LOG")"
     fi
+
+    IDLE_STREAK=0
 
     # Script tự chạy test, không tin lời báo cáo của agent. Stage trước để hook trong TEST_CMD
     # (vd. `pre-commit run`, chỉ xét file đã stage) thấy cả file mới — giống lúc commit.
