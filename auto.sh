@@ -16,6 +16,9 @@
 #   PLAN_MODEL=opus        model Claude viết PLAN.md
 #   REVIEW_MODEL=sonnet    model Claude review
 #   MAX_TRIES=3            số vòng sửa tối đa mỗi task
+#   REQUIRE_CMD=           lệnh kiểm tra dịch vụ ngoài TEST_CMD cần (vd. "docker compose exec -T postgres pg_isready");
+#                          chạy trước mỗi lần thử và khi test fail; lỗi thì chờ dịch vụ, không tính là lần thử
+#   REQUIRE_WAIT_MINS=30   thời gian tối đa chờ dịch vụ trong REQUIRE_CMD sẵn sàng, quá thì dừng (exit 6)
 #   MAX_WAIT_HOURS=6       tổng thời gian tối đa chờ khi Claude hoặc coding agent chạm giới hạn sử dụng
 #   AGY_ALLOWED_CMDS=...   danh sách lệnh nhắc agy dùng (phải khớp allowlist trong ~/.gemini/config/config.json)
 #   AGY_ALLOW_MCP=         MCP tool agy được dùng, dạng "server/tool" (ví dụ "flutter_dart-mcp-server/dtd");
@@ -33,7 +36,8 @@
 # (pre-commit, husky...) qua được với PATH hiện tại. Task PASS mà hook từ chối commit (sau khi đã
 # add lại file hook tự sửa) thì output hook vào REVIEW.md và tính là một vòng FAIL.
 # Mã thoát: 1 lỗi/task FAIL, 2 cầu dao, 3 quá MAX_WAIT_HOURS, 4 không review được,
-# 5 preflight (quyền hoặc git hook) chưa đạt.
+# 5 preflight (quyền hoặc git hook) chưa đạt, 6 dịch vụ trong REQUIRE_CMD không sẵn sàng.
+# Góp ý không chặn của reviewer (khi PASS) được gom vào summary.md và tích luỹ ở .auto-logs/nits.md.
 # Mỗi lần chạy ghi tiến độ vào .auto-logs/run.log và tóm tắt vào .auto-logs/summary.md.
 
 set -euo pipefail
@@ -77,7 +81,7 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS AGY_ALLOWED_CMDS AGY_ALLOW_MCP"
+CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -93,6 +97,8 @@ PLAN_MODEL="${PLAN_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
 MAX_TRIES="${MAX_TRIES:-3}"
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-6}"
+REQUIRE_CMD="${REQUIRE_CMD:-}"
+REQUIRE_WAIT_MINS="${REQUIRE_WAIT_MINS:-30}"
 AGY_ALLOWED_CMDS="${AGY_ALLOWED_CMDS:-git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which}"
 AGY_ALLOW_MCP="${AGY_ALLOW_MCP:-}"
 # Chỉ dùng khi test: thay thời gian chờ hạn mức bằng số giây này
@@ -496,6 +502,27 @@ check_commit_hooks() {
   return 1
 }
 
+# REQUIRE_CMD (vd. pg_isready): dịch vụ ngoài mà TEST_CMD cần. Chưa sẵn sàng thì chờ tối đa REQUIRE_WAIT_MINS
+# (kiểm lại mỗi 30s); vẫn chưa thì dừng exit 6. Thời gian chờ không tính vào lần thử của task.
+services_up() { [ -z "$REQUIRE_CMD" ] || bash -c "$REQUIRE_CMD" > "$LOG_DIR/require.log" 2>&1 < /dev/null; }
+require_services() {  # <ngữ cảnh>
+  local deadline
+  services_up && return 0
+  deadline=$(( $(date +%s) + REQUIRE_WAIT_MINS * 60 ))
+  echo "⏸️  Dịch vụ phụ thuộc chưa chạy ($1) — REQUIRE_CMD thất bại, chờ tối đa ${REQUIRE_WAIT_MINS} phút (log: $LOG_DIR/require.log)"
+  notify "Dịch vụ phụ thuộc chưa chạy, đang chờ"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep "${AUTOWF_REQUIRE_POLL_SECS:-30}"
+    if services_up; then echo "▶️  Dịch vụ phụ thuộc đã sẵn sàng, chạy tiếp"; return 0; fi
+  done
+  if [ -n "${N:-}" ]; then T_END[N]=$(date +%s); fi
+  stop 6 "Dịch vụ phụ thuộc chưa chạy ($1) — REQUIRE_CMD vẫn thất bại sau ${REQUIRE_WAIT_MINS} phút" \
+    "Lệnh: $REQUIRE_CMD
+Output cuối: $(tail -n 5 "$LOG_DIR/require.log" 2>/dev/null || true)
+Cách xử lý: khởi động dịch vụ (vd. docker compose up -d) rồi chạy lại autowf. Task chưa commit sẽ được làm lại;
+nếu cây còn thay đổi dở: git stash -u (bỏ) hoặc sửa tay rồi autowf --adopt N (giữ)."
+}
+
 # git add + commit; hook (vd. pre-commit tự format) sửa file làm commit fail thì add lại và thử thêm 1 lần.
 # Output của git/hook ghi vào <file log>.
 commit_task() {  # <message> <file log>
@@ -610,6 +637,11 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   fi
   if preflight_cached; then echo "✅ Preflight quyền đã đạt với cấu hình hiện tại"
   else echo "ℹ️  Preflight quyền chưa chạy với cấu hình hiện tại (sẽ tự chạy, hoặc: auto.sh --preflight)"; fi
+  if [ -n "$REQUIRE_CMD" ]; then
+    mkdir -p "$LOG_DIR"
+    if services_up; then echo "✅ Dịch vụ phụ thuộc sẵn sàng (REQUIRE_CMD: $REQUIRE_CMD)"
+    else echo "❌ Dịch vụ phụ thuộc chưa chạy — REQUIRE_CMD thất bại: $REQUIRE_CMD"; tail -n 3 "$LOG_DIR/require.log" | sed 's/^/     /'; OK=0; fi
+  fi
   if git rev-parse --git-dir >/dev/null 2>&1; then
     echo "🔎 Git hook (log: $LOG_DIR/preflight-hooks.log)"
     check_commit_hooks || OK=0
@@ -726,6 +758,17 @@ WAIT_COUNT=0
 WAITED_SECS=0
 FALLBACK_NOTE=""
 T_STATUS=(); T_TRIES=(); T_BEGIN=(); T_END=()
+RUN_NITS=""
+
+# Góp ý không chặn trong review PASS (mọi dòng trừ dòng PASS) → nits.md (tích luỹ) và RUN_NITS (summary.md)
+save_nits() {  # <N> <nội dung review>
+  local nits
+  nits=$(printf '%s\n' "$2" | { grep -vE '^[[:space:]#*]*PASS[[:space:]#*.]*$' || true; } | sed -e '/./,$!d')
+  [ -n "$(printf '%s' "$nits" | tr -d '[:space:]')" ] || return 0
+  { echo "## $(task_msg "$1") — $(git rev-parse --short HEAD), $(date '+%Y-%m-%d %H:%M')"; echo; printf '%s\n' "$nits"; echo; } >> "$LOG_DIR/nits.md"
+  RUN_NITS+="### $(task_msg "$1")"$'\n\n'"$nits"$'\n\n'
+  echo "📝 Reviewer có góp ý không chặn cho Task $1 (lưu ở $LOG_DIR/nits.md)"
+}
 
 write_summary() {
   local rc=$? n end
@@ -760,6 +803,14 @@ write_summary() {
           echo "| $n | ${T_STATUS[$n]:-chưa chạy} | - | - |"
         fi
       done
+    fi
+    if [ -n "$RUN_NITS" ]; then
+      echo
+      echo "## Góp ý không chặn của reviewer"
+      echo
+      echo "Task đã PASS nhưng reviewer vẫn góp ý (tích luỹ qua mọi lần chạy: $LOG_DIR/nits.md)."
+      echo
+      printf '%s' "$RUN_NITS"
     fi
   } > "$LOG_DIR/summary.md"
   echo "📝 Tóm tắt: $LOG_DIR/summary.md"
@@ -870,6 +921,7 @@ for N in $(seq 1 "$TOTAL"); do
     T_TRIES[N]=$TRY
     echo "▶️  Task $N/$TOTAL — lần $TRY ($ACTIVE_CODER)"
     CODE_LOG="$LOG_DIR/task$N-try$TRY-code.log"
+    require_services "trước Task $N lần $TRY"
     snapshot_git
     run_coder_waiting "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
 
@@ -902,6 +954,12 @@ Cách xử lý: $(diag_advice "$DIAG_TYPE" "$DIAG_EV" "$CODE_LOG")"
     # (vd. `pre-commit run`, chỉ xét file đã stage) thấy cả file mới — giống lúc commit.
     git add -A
     if TEST_OUT=$(bash -c "$TEST_CMD" 2>&1); then TEST_OK=1; else TEST_OK=0; fi
+    # Test fail lúc dịch vụ ngoài đang tắt: không phải lỗi của agent → chờ dịch vụ rồi chạy lại test
+    if [ "$TEST_OK" -eq 0 ] && ! services_up; then
+      echo "⚠️  Test fail trong lúc dịch vụ phụ thuộc không chạy — chờ dịch vụ rồi chạy lại test"
+      require_services "sau khi test Task $N lần $TRY fail"
+      if TEST_OUT=$(bash -c "$TEST_CMD" 2>&1); then TEST_OK=1; else TEST_OK=0; fi
+    fi
     printf '%s\n' "$TEST_OUT" > "$LOG_DIR/task$N-try$TRY-test.log"
     TEST_OUT=$(printf '%s\n' "$TEST_OUT" | tail -n 60)
 
@@ -936,7 +994,8 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
     echo "🔍 Claude ($REVIEW_MODEL) đang review..."
     claude_call "$REVIEW_IN" "$REVIEW_OUT" -p --model "$REVIEW_MODEL" "You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
 Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL.
-If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix'. Do not paste long code." \
+If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix'.
+If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted '- nit: file:location — suggestion'. Do not paste long code." \
       || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
 
     VERDICT=$(cat "$REVIEW_OUT")
@@ -951,6 +1010,7 @@ If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location �
       COMMIT_LOG="$LOG_DIR/task$N-try$TRY-commit.log"
       if commit_task "$(task_msg "$N")" "$COMMIT_LOG"; then
         T_END[N]=$(date +%s); T_STATUS[N]="PASS"
+        save_nits "$N" "$VERDICT"
         echo "✅ Task $N đạt"
         break
       fi
