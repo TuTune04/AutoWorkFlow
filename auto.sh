@@ -277,6 +277,7 @@ Cách xử lý: chạy lại auto.sh sau giờ reset (task đã commit được 
     echo "⏳ $1 hết hạn mức ở Task $N ($msg). Sẽ chạy lại lúc $(fmt_time $((now + wait_s)))."
     notify "$1 hết hạn mức, chạy lại Task $N lúc $(fmt_time $((now + wait_s)))"
     sleep "$wait_s"
+    echo "▶️  Hết giờ chờ — chạy lại $1 cho Task $N"
   done
 }
 
@@ -860,6 +861,7 @@ claude_call() {
     echo "⏳ Claude chạm giới hạn sử dụng ($msg). Sẽ chạy lại lúc $(fmt_time $((now + wait_s)))."
     notify "Claude hết hạn mức, chạy lại lúc $(fmt_time $((now + wait_s)))"
     sleep "$wait_s"
+    echo "▶️  Hết giờ chờ — gọi lại Claude"
   done
 }
 
