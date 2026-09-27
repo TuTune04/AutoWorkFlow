@@ -268,6 +268,36 @@ restore_plan() {  # <file log>
   echo "⚠️  Agent sửa PLAN.md ở Task $N — đã khôi phục (diff lưu trong $1)"
 }
 
+# agy_denied_commands — in các lệnh trong hội thoại agy gần nhất mà không rule `command(regex:...)` nào trong
+# AGY_CONFIG khớp (tức lệnh đã bị từ chối). Best-effort: không đọc được thì không in gì.
+AGY_HOME="${AGY_HOME:-$HOME/.gemini/antigravity-cli}"
+agy_denied_commands() {
+  local conv db
+  conv=$(grep -oE 'Tool confirmation for conversation [0-9a-f-]+ step [0-9]+ \(type=[^)]*approved=false' "$AGY_HOME/cli.log" 2>/dev/null \
+    | tail -n1 | sed -E 's/.*conversation ([0-9a-f-]+) .*/\1/')
+  db="$AGY_HOME/conversations/$conv.db"
+  [ -n "$conv" ] && [ -f "$db" ] && command -v python3 >/dev/null || return 0
+  strings "$db" 2>/dev/null | python3 -c '
+import json, re, sys
+try:
+    allow = json.load(open(sys.argv[1]))["userSettings"]["globalPermissionGrants"]["allow"]
+except Exception:
+    allow = []
+rules = [re.compile(r[len("command(regex:"):-1]) for r in allow if r.startswith("command(regex:")]
+seen = []
+for line in sys.stdin:
+    for m in re.finditer(r"\{\"CommandLine\":\"((?:[^\"\\]|\\.)*)\"", line):
+        try:
+            cmd = json.loads("\"" + m.group(1) + "\"")
+        except Exception:
+            continue
+        if cmd not in seen and not any(r.search(cmd) for r in rules):
+            seen.append(cmd)
+for c in seen[-3:]:
+    print(c[:200])
+' "$AGY_CONFIG" 2>/dev/null || true
+}
+
 # Chỉ coi là hết quota khi agent thoát lỗi VÀ cuối log có thông báo quota rõ ràng — tránh nhầm với
 # nội dung code (vd. task làm rate limit có chữ "429"/"rate limit" trong log).
 AGENT_QUOTA_RE='quota (reached|exceeded)|resource.?exhausted|usage limit|limit reached|resets in [0-9]'
@@ -971,6 +1001,7 @@ for N in $(seq 1 "$TOTAL"); do
   rm -f REVIEW.md
   PREV_SIG=""
   PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md. $GIT_RULE"
+  BASE_PROMPT="$PROMPT"; DENY_NOTE=""
 
   for TRY in $(seq 1 "$MAX_TRIES"); do
     T_TRIES[N]=$TRY
@@ -993,6 +1024,27 @@ for N in $(seq 1 "$TOTAL"); do
 
     undo_agent_git "$CODE_LOG"
     restore_plan "$CODE_LOG"
+
+    # agy bị từ chối một lệnh trong khi cấu hình quyền vẫn đạt preflight → không thiếu rule, mà agent dùng
+    # lệnh sai dạng (nối lệnh, `;` trong python3 -c, lệnh ngoài danh sách). Headless nên lượt chạy bị cắt:
+    # tính là một lần thử và chạy lại kèm lời nhắc, không dừng cả pipeline.
+    if [ "$ACTIVE_CODER" = agy ] && grep -qiE "$DIAG_PERM_RE" "$CODE_LOG" && preflight_cached; then
+      DENIED=$(agy_denied_commands)
+      DENY_NOTE="IMPORTANT: your previous run was stopped because a command was denied${DENIED:+: $(printf '%s' "$DENIED" | tr '\n' ' ')}. Every command must be ONE plain command from the allowed list, with no ; & | \$ or backticks anywhere (also not inside python3 -c code). To run multi-statement code, write a script file with the file-writing tool and run it; to search or read files, use the file tools."
+      echo "[auto.sh] lệnh bị từ chối, quyền vẫn đạt preflight → agent dùng lệnh sai dạng: ${DENIED:-không xác định được lệnh}" >> "$CODE_LOG"
+      echo "⚠️  Task $N lần $TRY: agent chạy lệnh sai dạng bị từ chối (${DENIED:-không rõ lệnh}) — chạy lại kèm nhắc nhở"
+      if [ -z "$(git status --porcelain)" ]; then
+        if [ "$TRY" -eq "$MAX_TRIES" ]; then
+          T_END[N]=$(date +%s)
+          stop 2 "Cầu dao: agent liên tục chạy lệnh sai dạng bị từ chối ở Task $N ($MAX_TRIES lần)" \
+            "Lệnh bị từ chối gần nhất: ${DENIED:-(không xác định)}
+Log: $CODE_LOG
+Cách xử lý: nếu lệnh đó thật sự cần, thêm vào AGY_ALLOWED_CMDS + rule hẹp rồi autowf --preflight; nếu không, làm rõ Task trong PLAN.md."
+        fi
+        PROMPT="$BASE_PROMPT $DENY_NOTE"; DENY_NOTE=""
+        continue
+      fi
+    fi
 
     # Cầu dao (a): agent không đổi file nào
     if [ -z "$(git status --porcelain)" ]; then
@@ -1131,6 +1183,7 @@ Hoặc sửa tay theo quyết định rồi: autowf --adopt $N"
 $(head -n 12 REVIEW.md 2>/dev/null || true)"
     fi
     PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
+    BASE_PROMPT="$PROMPT"; PROMPT="$PROMPT${DENY_NOTE:+ $DENY_NOTE}"; DENY_NOTE=""
   done
 done
 
