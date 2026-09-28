@@ -202,7 +202,7 @@ parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 
 }
 
 # ---- Coding agent ----
-AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool."
+AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool. Never use python3 -c or node -e to list, search or read files: to list files use ls -R <dir> or git ls-files <dir>; to search code use git grep <pattern> <path>; to read a file use the file-reading tool; for multi-statement code, write a script file with the file-writing tool and run it."
 if [ -z "$AGY_ALLOW_MCP" ]; then
   AGY_RULES+=" Do not use MCP tools; use CLI commands only (e.g. flutter test, flutter analyze, dart format)."
 else
