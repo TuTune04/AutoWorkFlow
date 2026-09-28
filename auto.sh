@@ -137,7 +137,10 @@ AGY_CLI_PROJECT="${AGY_CLI_PROJECT:-$HOME/.gemini/config/projects/default-cli-pr
 AGY_CONV_DIR="${AGY_CONV_DIR:-$HOME/.gemini/antigravity-cli/conversations}"
 
 LOG_DIR=".auto-logs"
-LIMIT_RE='usage limit|limit reached|rate limit|resets'
+# Thông báo hết hạn mức của Claude CLI, vd. "Claude AI usage limit reached|1727000000",
+# "5-hour limit reached ∙ resets 3pm", "You've hit your limit · resets 5pm". Không dùng "rate limit"/"resets"
+# trần: review về code rate limiter cũng chứa các chữ đó.
+LIMIT_RE='usage limit|limit reached|hit your (usage )?limit|rate limit (reached|exceeded)|resets (at |in )?[0-9]'
 CODER_AUTH_RE='auto-denied|cannot prompt|permission denied|not logged in|login required|please (log|sign) ?in|auth method|unauthenticated|authentication (failed|required)'
 DIFF_EXCLUDES=(
   ':(exclude,glob)**/.venv/**' ':(exclude,glob)**/node_modules/**' ':(exclude,glob)**/__pycache__/**'
@@ -1106,9 +1109,9 @@ stop() {  # stop <exit code> <lý do> [chi tiết nhiều dòng]
 
 # ---- Claude: tự chờ khi chạm giới hạn sử dụng ----
 is_usage_limit() {  # <file output> <exit code>
-  if [ "$2" -ne 0 ]; then grep -qiE "$LIMIT_RE" "$1"
-  else head -n1 "$1" | grep -qiE "$LIMIT_RE"   # thành công thì chỉ xét dòng đầu (dòng PASS/FAIL)
-  fi
+  # Thông báo hạn mức chỉ 1–2 dòng; output dài hơn là câu trả lời thật (dù có nhắc tới "limit")
+  [ "$(grep -c . "$1" 2>/dev/null || true)" -le 3 ] || return 1
+  grep -qiE "$LIMIT_RE" "$1"
 }
 
 # claude_call <file stdin> <file output> <tham số cho claude...>
