@@ -19,6 +19,8 @@
 #   PLAN_MODEL=opus        model Claude viết PLAN.md
 #   REVIEW_MODEL=sonnet    model Claude review
 #   MAX_TRIES=3            số vòng sửa tối đa mỗi task
+#   MAX_EXTRA_TRIES=2      số vòng thêm tối đa sau MAX_TRIES, chỉ khi vòng cuối còn tiến triển (reviewer báo
+#                          đã sửa được điểm cũ và số lỗi chặn giảm, hoặc chỉ còn hook từ chối commit)
 #   NTFY_TOPIC=            topic ntfy.sh để báo lên điện thoại khi dừng/xong/chờ (nên đặt trong ~/.zshrc,
 #                          không commit: ai biết topic đều đọc được thông báo); NTFY_SERVER=https://ntfy.sh
 #   REQUIRE_CMD=           lệnh kiểm tra dịch vụ ngoài TEST_CMD cần (vd. "docker compose exec -T postgres pg_isready");
@@ -101,7 +103,7 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
+CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_EXTRA_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -116,6 +118,7 @@ FALLBACK_CODER="${FALLBACK_CODER:-}"
 PLAN_MODEL="${PLAN_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
 MAX_TRIES="${MAX_TRIES:-3}"
+MAX_EXTRA_TRIES="${MAX_EXTRA_TRIES:-2}"
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-6}"
 DIFF_LIMIT="${DIFF_LIMIT:-120000}"
 REQUIRE_CMD="${REQUIRE_CMD:-}"
@@ -990,7 +993,11 @@ parse_verdict() {
   esac
 }
 # Nội dung review trừ các dòng kết luận PASS/FAIL
-review_body() { printf '%s\n' "$1" | { grep -vE '^[[:space:]#*`]*(PASS|FAIL)[[:space:]#*`.:]*$' || true; } | sed -e '/./,$!d'; }
+review_body() { printf '%s\n' "$1" | { grep -vE '^[[:space:]#*`]*(PASS|FAIL)[[:space:]#*`.:]*$|^[[:space:]#*`]*PROGRESS' || true; } | sed -e '/./,$!d'; }
+# Số điểm chặn trong một review (gạch đầu dòng, trừ nit và plan-gap)
+blocking_count() { review_body "$1" | { grep -E '^[[:space:]]*[-*][[:space:]]' || true; } | { grep -viE '^[[:space:]]*[-*][[:space:]]*(\*\*)?(nit|plan-gap)' || true; } | wc -l | tr -d ' '; }
+# Dòng 'PROGRESS: a/b' của reviewer → in "a b" (rỗng nếu không có)
+review_progress() { printf '%s\n' "$1" | sed -nE 's/^[[:space:]#*`]*PROGRESS[[:space:]*`]*:?[[:space:]*`]*([0-9]+)[[:space:]]*\/[[:space:]]*([0-9]+).*/\1 \2/p' | head -n 1; }
 
 # Test bị lỗi: lấy vài dòng lỗi cuối, bỏ số dòng / đường dẫn tạm / thời gian để so giữa các vòng
 test_signature() {
@@ -1053,8 +1060,11 @@ for N in $(seq 1 "$TOTAL"); do
   PREV_SIG=""
   PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md. $GIT_RULE"
   BASE_PROMPT="$PROMPT"; DENY_NOTE=""; IDLE_STREAK=0
+  TRY_LIMIT=$MAX_TRIES; PREV_BLOCKING=""
 
-  for TRY in $(seq 1 "$MAX_TRIES"); do
+  TRY=0
+  while [ "$TRY" -lt "$TRY_LIMIT" ]; do
+    TRY=$((TRY + 1))
     T_TRIES[N]=$TRY
     echo "▶️  Task $N/$TOTAL — lần $TRY ($ACTIVE_CODER)"
     CODE_LOG="$LOG_DIR/task$N-try$TRY-code.log"
@@ -1085,9 +1095,9 @@ for N in $(seq 1 "$TOTAL"); do
       echo "[auto.sh] lệnh bị từ chối, quyền vẫn đạt preflight → agent dùng lệnh sai dạng: ${DENIED:-không xác định được lệnh}" >> "$CODE_LOG"
       echo "⚠️  Task $N lần $TRY: agent chạy lệnh sai dạng bị từ chối (${DENIED:-không rõ lệnh}) — chạy lại kèm nhắc nhở"
       if [ -z "$(git status --porcelain)" ]; then
-        if [ "$TRY" -eq "$MAX_TRIES" ]; then
+        if [ "$TRY" -eq "$TRY_LIMIT" ]; then
           T_END[N]=$(date +%s)
-          stop 2 "Cầu dao: agent liên tục chạy lệnh sai dạng bị từ chối ở Task $N ($MAX_TRIES lần)" \
+          stop 2 "Cầu dao: agent liên tục chạy lệnh sai dạng bị từ chối ở Task $N ($TRY lần)" \
             "Lệnh bị từ chối gần nhất: ${DENIED:-(không xác định)}
 Log: $CODE_LOG
 Cách xử lý: nếu lệnh đó thật sự cần, thêm vào AGY_ALLOWED_CMDS + rule hẹp rồi autowf --preflight; nếu không, làm rõ Task trong PLAN.md."
@@ -1105,7 +1115,7 @@ Cách xử lý: nếu lệnh đó thật sự cần, thêm vào AGY_ALLOWED_CMDS
       # Agent thoát bình thường mà chưa làm gì (vd. chạy TEST_CMD nền rồi kết thúc lượt "sẽ chờ"):
       # thường chỉ xảy ra một lần → chạy lại kèm nhắc nhở; lặp lại liên tiếp mới dừng.
       IDLE_STREAK=$((IDLE_STREAK + 1))
-      if [ "$DIAG_TYPE" = NO_ACTION ] && [ "$IDLE_STREAK" -lt 2 ] && [ "$TRY" -lt "$MAX_TRIES" ]; then
+      if [ "$DIAG_TYPE" = NO_ACTION ] && [ "$IDLE_STREAK" -lt 2 ] && [ "$TRY" -lt "$TRY_LIMIT" ]; then
         echo "[auto.sh] agent kết thúc mà không sửa file nào (lần 1) → chạy lại kèm nhắc nhở" >> "$CODE_LOG"
         echo "⚠️  Task $N lần $TRY: agent kết thúc mà chưa sửa file nào (\"${DIAG_EV:0:100}\") — chạy lại kèm nhắc nhở"
         PROMPT="$BASE_PROMPT IMPORTANT: your previous run ended without changing any file; its last message was: \"${DIAG_EV:0:200}\". Do not end your turn until the task is implemented and $TEST_CMD passes. Long commands such as $TEST_CMD may continue in the background: wait for them to finish (check the command status) and read the result before ending your turn."
@@ -1181,7 +1191,7 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
     echo "🔍 Claude ($REVIEW_MODEL) đang review..."
     REVIEW_PROMPT="You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
 PLAN.md is fixed and approved: never ask the coder to edit PLAN.md; judge the code against it. If the diff is marked TRUNCATED, read the files listed as not shown from the working tree before judging, and never FAIL only because a file is missing from the truncated diff.
-If a PREVIOUS REVIEW section is present, first check every item in it: FAIL if any is still not fixed. For a problem it did not raise, FAIL only if it is a real bug, a security issue or a failing test; anything else is a nit.
+If a PREVIOUS REVIEW section is present, first check every item in it: FAIL if any is still not fixed. Then write one line 'PROGRESS: <fixed>/<total>' = how many of its items are now fixed. For a problem it did not raise, FAIL only if it is a real bug, a security issue or a failing test; anything else is a nit.
 If passing would need a decision PLAN.md does not make (behaviour, scope or requirement the plan does not specify), do not invent it and do not ask the coder to guess: write '- plan-gap: <what PLAN.md does not say> — <options>'. A plan-gap line in a FAIL stops the run for a human decision.
 Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL — and write that word on no other line.
 If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix' (or '- plan-gap: ...').
@@ -1223,10 +1233,27 @@ If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted 
         { grep -v '^[[:space:]]*$' "$COMMIT_LOG" || true; } | tail -n 40
       } > REVIEW.md
       echo "❌ Task $N: review PASS nhưng git hook từ chối commit (xem REVIEW.md, $COMMIT_LOG)"
+      PROGRESS_OK=1; PROGRESS_NOTE="review đã PASS, chỉ còn git hook từ chối commit"
+      PREV_BLOCKING=1
     else
       review_body "$VERDICT" > REVIEW.md
       if [ "$TEST_OK" -eq 0 ]; then printf '\n- Tests are FAILING (last lines):\n%s\n' "$TEST_OUT" >> REVIEW.md; fi
       echo "❌ Task $N chưa đạt (xem REVIEW.md)"
+      # Tiến triển so với vòng trước: reviewer xác nhận đã sửa ≥1 điểm cũ, và sửa hết điểm cũ hoặc số điểm chặn giảm
+      CUR_BLOCKING=$(blocking_count "$VERDICT")
+      PROG=$(review_progress "$VERDICT")
+      PROGRESS_OK=0; PROGRESS_NOTE="vòng đầu, chưa có gì để so"
+      if [ -n "$PREV_BLOCKING" ]; then
+        if [ -z "$PROG" ]; then
+          PROGRESS_NOTE="reviewer không báo PROGRESS"
+        else
+          FIXED=${PROG% *}; OF=${PROG#* }
+          PROGRESS_NOTE="sửa được $FIXED/$OF điểm cũ, số điểm chặn $PREV_BLOCKING → $CUR_BLOCKING"
+          if [ "$FIXED" -ge 1 ] && { [ "$FIXED" -ge "$OF" ] || [ "$CUR_BLOCKING" -lt "$PREV_BLOCKING" ]; }; then PROGRESS_OK=1; fi
+        fi
+        echo "   Tiến triển: $PROGRESS_NOTE"
+      fi
+      PREV_BLOCKING=$CUR_BLOCKING
       if [ -n "$PLAN_GAPS" ]; then
         T_END[N]=$(date +%s)
         stop 7 "Reviewer báo PLAN.md thiếu quyết định cho Task $N (plan-gap) — dừng để người quyết" \
@@ -1238,11 +1265,18 @@ Hoặc sửa tay theo quyết định rồi: autowf --adopt $N"
       fi
     fi
 
-    if [ "$TRY" -eq "$MAX_TRIES" ]; then
-      T_END[N]=$(date +%s)
-      stop 1 "Task $N thất bại sau $MAX_TRIES lần. Xem REVIEW.md và $LOG_DIR/" \
-        "Lỗi còn lại theo review/test lần cuối (REVIEW.md):
+    if [ "$TRY" -eq "$TRY_LIMIT" ]; then
+      # Hết lượt nhưng vòng này vẫn tiến triển → cho thêm lượt (tối đa MAX_EXTRA_TRIES); không thì dừng
+      if [ "$PROGRESS_OK" -eq 1 ] && [ "$TRY_LIMIT" -lt $((MAX_TRIES + MAX_EXTRA_TRIES)) ]; then
+        TRY_LIMIT=$((TRY_LIMIT + 1))
+        echo "➕ Task $N hết $TRY lượt nhưng vẫn tiến triển ($PROGRESS_NOTE) — cho thêm lượt $TRY_LIMIT (tối đa $((MAX_TRIES + MAX_EXTRA_TRIES)))"
+      else
+        T_END[N]=$(date +%s)
+        if [ "$PROGRESS_OK" -eq 1 ]; then WHY="đã dùng hết $MAX_EXTRA_TRIES lượt thêm (MAX_EXTRA_TRIES)"; else WHY="vòng cuối không tiến triển: $PROGRESS_NOTE"; fi
+        stop 1 "Task $N thất bại sau $TRY lần ($WHY). Xem REVIEW.md và $LOG_DIR/" \
+          "Lỗi còn lại theo review/test lần cuối (REVIEW.md):
 $(head -n 12 REVIEW.md 2>/dev/null || true)"
+      fi
     fi
     PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
     BASE_PROMPT="$PROMPT"; PROMPT="$PROMPT${DENY_NOTE:+ $DENY_NOTE}"; DENY_NOTE=""
