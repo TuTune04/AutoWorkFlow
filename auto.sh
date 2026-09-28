@@ -7,6 +7,7 @@
 #   ./auto.sh --check         chỉ kiểm tra công cụ, PLAN.md, git và git hook rồi thoát
 #   ./auto.sh --new-branch    ép tạo branch auto/* mới thay vì làm tiếp branch auto/* hiện tại
 #   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) và git hook rồi thoát
+#   ./auto.sh --notify-test   gửi thử một thông báo (Mac + ntfy nếu có NTFY_TOPIC) rồi thoát
 #   ./auto.sh --adopt N       nhận Task N đã làm/kiểm tra bằng tay: chạy TEST_CMD rồi commit thay đổi (hoặc
 #                             đổi tên commit HEAD) thành "Task N: <tiêu đề>" để lần chạy sau bỏ qua
 #
@@ -16,6 +17,8 @@
 #   PLAN_MODEL=opus        model Claude viết PLAN.md
 #   REVIEW_MODEL=sonnet    model Claude review
 #   MAX_TRIES=3            số vòng sửa tối đa mỗi task
+#   NTFY_TOPIC=            topic ntfy.sh để báo lên điện thoại khi dừng/xong/chờ (nên đặt trong ~/.zshrc,
+#                          không commit: ai biết topic đều đọc được thông báo); NTFY_SERVER=https://ntfy.sh
 #   REQUIRE_CMD=           lệnh kiểm tra dịch vụ ngoài TEST_CMD cần (vd. "docker compose exec -T postgres pg_isready");
 #                          chạy trước mỗi lần thử và khi test fail; lỗi thì chờ dịch vụ, không tính là lần thử
 #   REQUIRE_WAIT_MINS=30   thời gian tối đa chờ dịch vụ trong REQUIRE_CMD sẵn sàng, quá thì dừng (exit 6)
@@ -49,12 +52,14 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 NEW_BRANCH=0
 CHECK_ONLY=0
 PREFLIGHT_ONLY=0
+NOTIFY_TEST=0
 ADOPT=""
 DESC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --new-branch) NEW_BRANCH=1 ;;
     --check)      CHECK_ONLY=1 ;;
+    --notify-test) NOTIFY_TEST=1 ;;
     --preflight)  PREFLIGHT_ONLY=1 ;;
     --adopt=*)    ADOPT="${1#--adopt=}"; [ -n "$ADOPT" ] || ADOPT=x ;;
     --adopt)      ADOPT="${2:-x}"; if [ $# -gt 1 ]; then shift; fi ;;
@@ -65,7 +70,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-notify()   { osascript -e "display notification \"$1\" with title \"auto.sh\"" 2>/dev/null || true; }
+# Thông báo trên Mac; có NTFY_TOPIC thì gửi thêm lên ntfy (app ntfy trên điện thoại). <mức>: default | high
+notify() {
+  osascript -e "display notification \"$1\" with title \"auto.sh\"" 2>/dev/null || true
+  [ -n "${NTFY_TOPIC:-}" ] || return 0
+  # Header chỉ an toàn với ASCII: tiêu đề (có dấu, tên project) mã hoá RFC 2047
+  curl -fsS -m 10 -H "Title: =?UTF-8?B?$(printf 'autowf — %s' "$(basename "$PWD")" | base64 | tr -d '\n')?=" -H "Priority: ${2:-default}" \
+    ${3:+-H "Tags: $3"} -d "$1" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null 2>&1 \
+    || { NOTIFY_FAILED=1; echo "⚠️  Không gửi được thông báo ntfy (topic $NTFY_TOPIC)"; }
+}
 need()     { command -v "$1" >/dev/null || { echo "❌ Thiếu '$1'. $2"; exit 1; }; }
 fmt_time() { date -r "$1" '+%H:%M %d/%m' 2>/dev/null || date -d "@$1" '+%H:%M %d/%m'; }
 fmt_dur()  { printf '%dh%02dm%02ds' $(($1 / 3600)) $(($1 % 3600 / 60)) $(($1 % 60)); }
@@ -83,7 +96,7 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
+CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -690,6 +703,16 @@ run_preflight() {
   return 1
 }
 
+# ---- --notify-test ----
+if [ "$NOTIFY_TEST" -eq 1 ]; then
+  if [ -z "${NTFY_TOPIC:-}" ]; then echo "ℹ️  Chưa đặt NTFY_TOPIC — chỉ hiện thông báo trên Mac"; fi
+  NOTIFY_FAILED=0
+  notify "Thử thông báo từ autowf ($(date '+%H:%M %d/%m'))" default test_tube
+  [ "$NOTIFY_FAILED" -eq 0 ] || exit 1
+  echo "✅ Đã gửi thử${NTFY_TOPIC:+ lên ${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC}"
+  exit 0
+fi
+
 # ---- --check ----
 if [ "$CHECK_ONLY" -eq 1 ]; then
   OK=1
@@ -706,6 +729,8 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   fi
   if preflight_cached; then echo "✅ Preflight quyền đã đạt với cấu hình hiện tại"
   else echo "ℹ️  Preflight quyền chưa chạy với cấu hình hiện tại (sẽ tự chạy, hoặc: auto.sh --preflight)"; fi
+  if [ -n "${NTFY_TOPIC:-}" ]; then echo "✅ Báo lên điện thoại qua ntfy (topic $NTFY_TOPIC; thử: auto.sh --notify-test)"
+  else echo "ℹ️  Chưa đặt NTFY_TOPIC — chỉ thông báo trên Mac"; fi
   if [ -n "$REQUIRE_CMD" ]; then
     mkdir -p "$LOG_DIR"
     if services_up; then echo "✅ Dịch vụ phụ thuộc sẵn sàng (REQUIRE_CMD: $REQUIRE_CMD)"
@@ -892,7 +917,7 @@ stop() {  # stop <exit code> <lý do> [chi tiết nhiều dòng]
   STOP_DETAILS="${3:-}"
   echo "⛔ $2"
   if [ -n "$STOP_DETAILS" ]; then printf '%s\n' "$STOP_DETAILS" | sed 's/^/   /'; fi
-  notify "$2"
+  notify "$2" high rotating_light
   exit "$1"
 }
 
@@ -1199,6 +1224,6 @@ $(head -n 12 REVIEW.md 2>/dev/null || true)"
 done
 
 STOP_REASON="Hoàn thành cả $TOTAL task"
-notify "Xong cả $TOTAL task 🎉"
+notify "Xong cả $TOTAL task 🎉" default tada
 echo "🎉 Xong $TOTAL task trên branch $BRANCH. Log ở $LOG_DIR/"
 echo "   Gộp vào nhánh chính:  git checkout main && git merge $BRANCH"
