@@ -31,6 +31,8 @@
 #   AGY_ALLOWED_CMDS=...   danh sách lệnh nhắc agy dùng (phải khớp allowlist trong ~/.gemini/config/config.json)
 #   AGY_ALLOW_MCP=         MCP tool agy được dùng, dạng "server/tool" (ví dụ "flutter_dart-mcp-server/dtd");
 #                          rỗng = nhắc agent không dùng MCP, chỉ dùng lệnh CLI
+#   AGY_TOKEN_WARN=3000000 cảnh báo khi tổng token input của agy trong một task vượt ngưỡng (0 = tắt);
+#                          số lần gọi model / token của agy từng task ghi trong summary.md
 # Ví dụ:
 #   REVIEW_MODEL=haiku ./auto.sh
 #   CODER=gemini ./auto.sh
@@ -103,7 +105,7 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_EXTRA_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS"
+CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_EXTRA_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS AGY_TOKEN_WARN"
 if [ -f .autowf.env ]; then
   ENV_OVERRIDES=""
   for v in $CONFIG_VARS; do
@@ -125,6 +127,8 @@ REQUIRE_CMD="${REQUIRE_CMD:-}"
 REQUIRE_WAIT_MINS="${REQUIRE_WAIT_MINS:-30}"
 AGY_ALLOWED_CMDS="${AGY_ALLOWED_CMDS:-git, python3, .venv/bin/python, .venv/bin/pip, ls, mkdir, which}"
 AGY_ALLOW_MCP="${AGY_ALLOW_MCP:-}"
+# Cảnh báo khi tổng token input của agy trong một task vượt ngưỡng này (0 = tắt)
+AGY_TOKEN_WARN="${AGY_TOKEN_WARN:-3000000}"
 # Chỉ dùng khi test: thay thời gian chờ hạn mức bằng số giây này
 AUTOWF_TEST_WAIT_SECS="${AUTOWF_TEST_WAIT_SECS:-}"
 AGY_CONFIG="${AGY_CONFIG:-$HOME/.gemini/config/config.json}"
@@ -167,6 +171,69 @@ plan_excerpt() {
     cur == n { body = body $0 "\n" }
     END { if (body != "") printf "%s%s", head, body }
   ' PLAN.md
+}
+
+# Bản đồ thư mục cho agent: thư mục (tối đa 3 cấp) kèm số file đã track bên trong, tối đa 80 dòng.
+# Đưa sẵn vào prompt để agent không phải tự liệt kê cả repo.
+repo_map() {
+  git ls-files 2>/dev/null | awk -F/ '
+    NF == 1 { top++; next }
+    { d = ""; for (i = 1; i < NF && i <= 3; i++) { d = d $i "/"; n[d]++ } }
+    END { if (top) print "./ (" top " files at the root)"; for (k in n) print k " (" n[k] " files)" }
+  ' | sort | awk 'NR <= 80 { print; next } { more++ } END { if (more) print "... (" more " more directories)" }'
+}
+
+# Agent ghi tóm tắt task vào SUMMARY_FILE (bị .gitignore); auto.sh tự nối vào PROGRESS.md lúc commit,
+# nên agent không phải đọc PROGRESS.md (file này dài thêm sau mỗi task).
+SUMMARY_FILE="TASK_SUMMARY.md"
+
+# task_prompt <N> <first|fix> — prompt cho agent: kèm sẵn tổng quan + Task N của PLAN.md (agent khỏi đọc cả
+# PLAN.md) và, ở lần đầu, bản đồ thư mục. Không cắt được đoạn của Task N thì để agent tự đọc PLAN.md.
+task_prompt() {
+  local part summary head
+  part=$(plan_excerpt "$1")
+  if [ "$2" = first ]; then
+    summary="Write a short English summary of what you did (3-6 bullet lines, no heading) to $SUMMARY_FILE, replacing its content; do not read or edit PROGRESS.md, the script appends your summary to it."
+  else
+    summary="Update $SUMMARY_FILE (3-6 bullet lines, no heading) so it summarizes the whole task; do not read or edit PROGRESS.md."
+  fi
+  if [ -z "$part" ]; then
+    if [ "$2" = first ]; then
+      echo "Read PLAN.md and implement ONLY Task $1. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. $summary $GIT_RULE"
+    else
+      echo "Task $1 is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $1, and do not work on other tasks. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD. $summary $GIT_RULE"
+    fi
+    return 0
+  fi
+  if [ "$2" = first ]; then
+    head="Implement ONLY Task $1 of the approved plan. The plan overview and Task $1 are quoted below: that is all of PLAN.md you need, so do not open PLAN.md and do not work on other tasks. Never modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes."
+  else
+    head="Task $1 is not done yet. Read REVIEW.md and fix exactly the issues listed for Task $1; do not work on other tasks. The plan overview and Task $1 are quoted below, so do not open PLAN.md. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD."
+  fi
+  printf '%s %s %s\n\n=== PLAN.md (overview + Task %s) ===\n%s\n=== END OF PLAN EXCERPT ===\n' "$head" "$summary" "$GIT_RULE" "$1" "$part"
+  if [ "$2" = first ]; then
+    printf '\n=== REPOSITORY DIRECTORIES (tracked files inside each) ===\n%s\n=== END OF DIRECTORIES ===\n' "$(repo_map)"
+  fi
+}
+
+# Trước commit Task N: nối SUMMARY_FILE vào PROGRESS.md (lưu bản cũ để khôi phục nếu commit bị hook từ chối)
+append_progress() {  # <N>
+  PROGRESS_SAVED=""
+  [ -s "$SUMMARY_FILE" ] || return 0
+  if [ -f PROGRESS.md ]; then
+    PROGRESS_SAVED="$LOG_DIR/PROGRESS.md.before-task$1"; cp PROGRESS.md "$PROGRESS_SAVED"
+  else
+    PROGRESS_SAVED="(none)"; echo "# Progress Log" > PROGRESS.md
+  fi
+  { echo; echo "## $(task_msg "$1")"; sed -e '/./,$!d' "$SUMMARY_FILE"; } >> PROGRESS.md
+}
+restore_progress() {
+  case "$PROGRESS_SAVED" in
+    "") ;;
+    "(none)") rm -f PROGRESS.md ;;
+    *) cp "$PROGRESS_SAVED" PROGRESS.md ;;
+  esac
+  PROGRESS_SAVED=""
 }
 
 # Commit message của Task N: "Task N: <tiêu đề trong PLAN.md>" (hoặc "Task N" nếu heading không có tiêu đề)
@@ -223,7 +290,7 @@ parse_reset_time() {  # <file output> <now> → in epoch lúc reset; trả về 
 }
 
 # ---- Coding agent ----
-AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool. Never use python3 -c or node -e to list, search or read files: to list files use ls -R <dir> or git ls-files <dir>; to search code use git grep <pattern> <path>; to read a file use the file-reading tool; for multi-statement code, write a script file with the file-writing tool and run it."
+AGY_RULES="Command rules (mandatory; any other command is auto-denied and ends your run): only use $AGY_ALLOWED_CMDS; run exactly ONE command per call, never chain commands with ; && || | or \$(...); do not use cd, rm, cat or echo. Create/edit files with the file-writing tool and read files with the file-reading tool. Never use python3 -c or node -e to list, search or read files: to list files use git ls-files <dir> or ls <dir> on the narrowest directory you need (never list the whole repository); to search code use git grep -n <pattern> <path>; to read a file use the file-reading tool; for multi-statement code, write a script file with the file-writing tool and run it. Read only what the task needs: start from the files the task names, locate other code with git grep -n <symbol> <path>, and read only the relevant line range of large files (the file-reading tool takes start and end lines) instead of whole files; do not re-read a file you already read unless it changed."
 if [ -z "$AGY_ALLOW_MCP" ]; then
   AGY_RULES+=" Do not use MCP tools; use CLI commands only (e.g. flutter test, flutter analyze, dart format)."
 else
@@ -278,6 +345,73 @@ run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CO
     gemini) gemini -p "$2" --yolo ;;
     *)      "$1" -p "$2" ;;
   esac < /dev/null > "$3" 2>&1 || CODER_RC=$?
+  [ "$1" != agy ] || record_agy_usage "$3"
+}
+
+# agy_usage — đọc các hội thoại agy ghi sau lần gọi agent cuối (gen_metadata trong file .db) và in
+# "<số lần gọi model> <token input chưa cache> <token input có cache> <token output> <ngữ cảnh lớn nhất>".
+# Định dạng protobuf không có tài liệu: trường 1.4.{2,5,3} = input chưa cache / input có cache / output
+# (suy ra từ dữ liệu thật). Best-effort: không đọc được thì không in gì. Chạy agy tay cùng lúc sẽ bị tính chung.
+agy_usage() {
+  local dbs
+  dbs=$(find "$AGY_CONV_DIR" -name '*.db' -newer "$LOG_DIR/.coder-start" 2>/dev/null || true)
+  [ -n "$dbs" ] && command -v python3 >/dev/null || return 0
+  printf '%s\n' "$dbs" | python3 -c '
+import sqlite3, sys
+def varint(b, i):
+    r = s = 0
+    while True:
+        c = b[i]; i += 1; r |= (c & 0x7f) << s; s += 7
+        if c < 0x80: return r, i
+def fields(b):
+    i, out = 0, {}
+    while i < len(b):
+        k, i = varint(b, i); f, t = k >> 3, k & 7
+        if t == 0: v, i = varint(b, i)
+        elif t == 2: l, i = varint(b, i); v = b[i:i + l]; i += l
+        elif t == 1: v = None; i += 8
+        elif t == 5: v = None; i += 4
+        else: raise ValueError
+        out.setdefault(f, v)
+    return out
+calls = new = cached = out = peak = 0
+for path in sys.stdin.read().split():
+    try:
+        rows = sqlite3.connect(path, timeout=5).execute("select data from gen_metadata").fetchall()
+    except Exception:
+        continue
+    for (d,) in rows:
+        try:
+            u = fields(fields(fields(d)[1])[4])
+        except Exception:
+            continue
+        n, c = u.get(2, 0), u.get(5, 0)
+        if not isinstance(n, int) or not isinstance(c, int): continue
+        calls += 1; new += n; cached += c; out += u.get(3, 0) if isinstance(u.get(3, 0), int) else 0
+        peak = max(peak, n + c)
+if calls: print(calls, new, cached, out, peak)
+' 2>/dev/null || true
+}
+
+fmt_tok() { awk -v n="$1" 'BEGIN { if (n >= 1e6) printf "%.1fM", n / 1e6; else if (n >= 1e3) printf "%.0fk", n / 1e3; else printf "%d", n }'; }
+
+record_agy_usage() {  # <file log> — cộng dồn token của lần gọi agy vừa xong vào Task N, ghi vào <log>.usage
+  # (không ghi vào log chính: diagnose_agent_log lấy dòng cuối của nó làm bằng chứng)
+  local u calls new cached out peak
+  u=$(agy_usage); [ -n "$u" ] || return 0
+  read -r calls new cached out peak <<< "$u"
+  echo "[auto.sh] agy usage: $calls model calls, input $new uncached + $cached cached, output $out, peak context $peak" >> "$1.usage"
+  [ -n "${N:-}" ] || return 0
+  T_CALLS[N]=$(( ${T_CALLS[N]:-0} + calls ))
+  T_TOKIN[N]=$(( ${T_TOKIN[N]:-0} + new + cached ))
+  T_TOKCACHE[N]=$(( ${T_TOKCACHE[N]:-0} + cached ))
+  T_TOKOUT[N]=$(( ${T_TOKOUT[N]:-0} + out ))
+  [ "$peak" -le "${T_PEAK[N]:-0}" ] || T_PEAK[N]=$peak
+  echo "📊 agy: $calls lần gọi model, input $(fmt_tok $((new + cached))) ($(fmt_tok "$cached") cache), output $(fmt_tok "$out"), ngữ cảnh lớn nhất $(fmt_tok "$peak")"
+  if [ "$AGY_TOKEN_WARN" -gt 0 ] && [ "${T_TOKIN[N]}" -gt "$AGY_TOKEN_WARN" ] && [ -z "${T_WARNED[N]:-}" ]; then
+    T_WARNED[N]=1
+    echo "⚠️  Task $N đã dùng $(fmt_tok "${T_TOKIN[N]}") token input của agy (> AGY_TOKEN_WARN=$(fmt_tok "$AGY_TOKEN_WARN")) — cân nhắc chia nhỏ task này trong PLAN.md"
+  fi
 }
 
 # PLAN.md là hợp đồng đã duyệt: agent sửa (dù reviewer gợi ý) thì khôi phục về HEAD và ghi lại diff.
@@ -874,13 +1008,13 @@ mkdir -p "$LOG_DIR"
 exec > >(trap '' INT; exec tee -a "$LOG_DIR/run.log") 2>&1
 echo "===== auto.sh bắt đầu $(date '+%Y-%m-%d %H:%M:%S') trên branch $BRANCH ====="
 touch .gitignore
-for line in "$LOG_DIR/" "REVIEW.md"; do
+for line in "$LOG_DIR/" "REVIEW.md" "$SUMMARY_FILE"; do
   grep -qxF "$line" .gitignore || echo "$line" >> .gitignore
 done
-git rm -q --cached --ignore-unmatch REVIEW.md >/dev/null
+git rm -q --cached --ignore-unmatch REVIEW.md "$SUMMARY_FILE" >/dev/null
 if [ -n "$(git status --porcelain)" ]; then
   # Commit dọn dẹp chỉ đụng .gitignore: bỏ qua hook để lỗi hook được báo rõ ở bước kiểm tra hook bên dưới
-  git add -A && git commit -qm "auto.sh: ignore $LOG_DIR/ and REVIEW.md" --no-verify
+  git add -A && git commit -qm "auto.sh: ignore $LOG_DIR/, REVIEW.md and $SUMMARY_FILE" --no-verify
 fi
 
 # ---- Tóm tắt cuối mỗi lần chạy ----
@@ -894,6 +1028,8 @@ WAIT_COUNT=0
 WAITED_SECS=0
 FALLBACK_NOTE=""
 T_STATUS=(); T_TRIES=(); T_BEGIN=(); T_END=()
+T_CALLS=(); T_TOKIN=(); T_TOKCACHE=(); T_TOKOUT=(); T_PEAK=(); T_WARNED=()
+PROGRESS_SAVED=""
 RUN_NITS=""
 
 # Góp ý không chặn trong review PASS (mọi dòng trừ dòng PASS) → nits.md (tích luỹ) và RUN_NITS (summary.md)
@@ -929,14 +1065,19 @@ write_summary() {
     # seq trên macOS với `seq 1 0` in ra "1 0", nên chỉ in bảng khi đã đọc được plan
     if [ "$TOTAL" -gt 0 ]; then
       echo
-      echo "| Task | Kết quả | Số vòng | Thời gian |"
-      echo "|---|---|---|---|"
+      echo "| Task | Kết quả | Số vòng | Thời gian | agy: lần gọi model | input (cache) | output | ngữ cảnh max |"
+      echo "|---|---|---|---|---|---|---|---|"
       for n in $(seq 1 "$TOTAL"); do
         if [ -n "${T_BEGIN[$n]:-}" ]; then
           end="${T_END[$n]:-$(date +%s)}"
-          echo "| $n | ${T_STATUS[$n]:-?} | ${T_TRIES[$n]:-0} | $(fmt_dur $((end - T_BEGIN[n]))) |"
+          if [ -n "${T_CALLS[$n]:-}" ]; then
+            use="${T_CALLS[$n]} | $(fmt_tok "${T_TOKIN[$n]}") ($(fmt_tok "${T_TOKCACHE[$n]}")) | $(fmt_tok "${T_TOKOUT[$n]}") | $(fmt_tok "${T_PEAK[$n]}")"
+          else
+            use="- | - | - | -"
+          fi
+          echo "| $n | ${T_STATUS[$n]:-?} | ${T_TRIES[$n]:-0} | $(fmt_dur $((end - T_BEGIN[n]))) | $use |"
         else
-          echo "| $n | ${T_STATUS[$n]:-chưa chạy} | - | - |"
+          echo "| $n | ${T_STATUS[$n]:-chưa chạy} | - | - | - | - | - | - |"
         fi
       done
     fi
@@ -1037,6 +1178,8 @@ MANDATORY format:
 - Start with a short project overview (stack, layout, conventions) before '## Task 1'; reviewers only see that overview plus one task.
 - Each task is a heading '## Task N: <title>' (N starts at 1, consecutive).
 - Each task is small enough for one agent run; list the files to create/modify and acceptance criteria verifiable by tests.
+- Keep tasks small (few files, one concern): the coding agent's token cost grows with every file it reads and every step it takes.
+- Make TEST_CMD print compact output (e.g. pytest -q, vitest --reporter=dot, go test without -v): the agent reads that output on every run.
 - Task 1 sets up the project skeleton and test configuration so TEST_CMD runs.
 - Write it so another coding agent can follow it without asking questions." \
     --model "$PLAN_MODEL" --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" || true
@@ -1076,9 +1219,9 @@ for N in $(seq 1 "$TOTAL"); do
   fi
 
   T_BEGIN[N]=$(date +%s); T_STATUS[N]="FAIL"; T_TRIES[N]=0
-  rm -f REVIEW.md
+  rm -f REVIEW.md "$SUMMARY_FILE"
   PREV_SIG=""
-  PROMPT="Read PLAN.md and implement ONLY Task $N. Do not work on other tasks and do not modify PLAN.md. When the code is done, run: $TEST_CMD and fix things until it passes. Write a short English summary of what you did to PROGRESS.md. $GIT_RULE"
+  PROMPT=$(task_prompt "$N" first)
   BASE_PROMPT="$PROMPT"; DENY_NOTE=""; IDLE_STREAK=0
   TRY_LIMIT=$MAX_TRIES; PREV_BLOCKING=""
 
@@ -1240,13 +1383,16 @@ If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted 
     if [ "$FIRST" = PASS ] && [ "$TEST_OK" -eq 1 ]; then
       rm -f REVIEW.md
       COMMIT_LOG="$LOG_DIR/task$N-try$TRY-commit.log"
+      append_progress "$N"
       if commit_task "$(task_msg "$N")" "$COMMIT_LOG"; then
+        PROGRESS_SAVED=""; rm -f "$SUMMARY_FILE"
         T_END[N]=$(date +%s); T_STATUS[N]="PASS"
         save_nits "$N" "$VERDICT"
         echo "✅ Task $N đạt"
         break
       fi
       # Hook từ chối commit (kể cả sau khi đã add lại file hook tự sửa) → coi như một vòng FAIL
+      restore_progress
       {
         echo "- git commit was rejected by the repository's git hooks (pre-commit etc.). Fix every problem the hooks report below, then re-run: $TEST_CMD"
         echo; echo "Hook output (last lines):"
@@ -1298,7 +1444,7 @@ Hoặc sửa tay theo quyết định rồi: autowf --adopt $N"
 $(head -n 12 REVIEW.md 2>/dev/null || true)"
       fi
     fi
-    PROMPT="Task $N is not done yet. Read REVIEW.md and PLAN.md, fix exactly the issues listed for Task $N, and do not work on other tasks. Never modify PLAN.md, even if REVIEW.md suggests it. Re-run: $TEST_CMD. Update PROGRESS.md. $GIT_RULE"
+    PROMPT=$(task_prompt "$N" fix)
     BASE_PROMPT="$PROMPT"; PROMPT="$PROMPT${DENY_NOTE:+ $DENY_NOTE}"; DENY_NOTE=""
   done
 done
