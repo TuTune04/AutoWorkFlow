@@ -323,13 +323,28 @@ for c in seen[-3:]:
 # nội dung code (vd. task làm rate limit có chữ "429"/"rate limit" trong log).
 AGENT_QUOTA_RE='quota (reached|exceeded)|resource.?exhausted|usage limit|limit reached|resets in [0-9]'
 
+# Lỗi mạng tạm thời giữa agent và dịch vụ model (không phải lỗi agent/code): thử lại sau 1, 2, 4 phút.
+AGENT_NET_RE='broken pipe|connection reset|connection refused|i/o timeout|tls handshake timeout|no such host|network is unreachable|unexpected eof|service unavailable|"status":"UNAVAILABLE"'
+NET_RETRIES=3
+
 # run_coder_waiting <agent> <prompt> <file log> — như run_coder, nhưng agent hết quota thì ngủ tới giờ
 # reset rồi chạy lại cùng prompt; log lần hết quota giữ lại ở <log>.quota-K. Vượt MAX_WAIT_HOURS thì dừng.
 run_coder_waiting() {
-  local k=0 now reset_at wait_s msg
+  local k=0 net=0 now reset_at wait_s msg
   while true; do
     run_coder "$1" "$2" "$3"
     [ "$CODER_RC" -ne 0 ] || return 0
+    if tail -n 30 "$3" 2>/dev/null | grep -qiE "$AGENT_NET_RE"; then
+      net=$((net + 1))
+      [ "$net" -le "$NET_RETRIES" ] || return 0   # hết lượt thử lại → cầu dao CRASH xử lý như cũ
+      cp "$3" "$3.net-$net"
+      wait_s=$((60 * (1 << (net - 1))))
+      [ -z "$AUTOWF_TEST_WAIT_SECS" ] || wait_s="$AUTOWF_TEST_WAIT_SECS"
+      echo "🌐 $1 lỗi mạng ở Task $N ($(tail -n 30 "$3" | grep -oiE -m1 "$AGENT_NET_RE")) — thử lại lần $net/$NET_RETRIES sau ${wait_s}s"
+      echo "[auto.sh] lỗi mạng tạm thời, thử lại lần $net/$NET_RETRIES (log gốc: $3.net-$net)" >> "$3.net-$net"
+      sleep "$wait_s"
+      continue
+    fi
     tail -n 30 "$3" 2>/dev/null | grep -qiE "$AGENT_QUOTA_RE" || return 0
 
     k=$((k + 1)); cp "$3" "$3.quota-$k"
@@ -482,7 +497,12 @@ diag_advice() {
       if at=$(parse_reset_time "$log" "$now"); then echo "Hết hạn mức phía agent: chờ tới $(fmt_time "$at") rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER)."
       else echo "Hết hạn mức phía agent: không đọc được giờ reset, chờ khoảng 30–60 phút rồi chạy lại auto.sh (hoặc đặt FALLBACK_CODER)."; fi ;;
     TIMEOUT)   echo "Agent chạy quá thời gian: chia Task này nhỏ hơn trong PLAN.md hoặc chạy lại auto.sh." ;;
-    CRASH)     echo "Agent thoát bất thường: xem log, thử cập nhật agent (\`$ACTIVE_CODER update\`) rồi chạy lại auto.sh." ;;
+    CRASH)
+      if grep -qiE "$AGENT_NET_RE" "$log" 2>/dev/null; then
+        echo "Lỗi mạng giữa agent và dịch vụ model (đã tự thử lại $NET_RETRIES lần): kiểm tra Wi-Fi/VPN rồi chạy lại auto.sh."
+      else
+        echo "Agent thoát bất thường: xem log, thử cập nhật agent (\`$ACTIVE_CODER update\`) rồi chạy lại auto.sh."
+      fi ;;
     NO_ACTION) echo "Agent chạy xong nhưng không sửa file nào: đọc log xem nó hiểu sai gì, làm rõ Task trong PLAN.md rồi chạy lại." ;;
     *)         echo "Không rõ nguyên nhân: xem $log." ;;
   esac
