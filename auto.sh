@@ -7,6 +7,8 @@
 #   ./auto.sh --check         chỉ kiểm tra công cụ, PLAN.md, git và git hook rồi thoát
 #   ./auto.sh --new-branch    ép tạo branch auto/* mới thay vì làm tiếp branch auto/* hiện tại
 #   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) và git hook rồi thoát
+#   ./auto.sh --stop-after    (từ tab khác, trong repo) lần chạy đang chạy dừng sau khi task hiện tại xong;
+#                             huỷ yêu cầu: ./auto.sh --no-stop-after
 #   ./auto.sh --notify-test   gửi thử một thông báo (Mac + ntfy nếu có NTFY_TOPIC) rồi thoát
 #   ./auto.sh --adopt N       nhận Task N đã làm/kiểm tra bằng tay: chạy TEST_CMD rồi commit thay đổi (hoặc
 #                             đổi tên commit HEAD) thành "Task N: <tiêu đề>" để lần chạy sau bỏ qua
@@ -53,6 +55,7 @@ NEW_BRANCH=0
 CHECK_ONLY=0
 PREFLIGHT_ONLY=0
 NOTIFY_TEST=0
+STOP_AFTER=""
 ADOPT=""
 DESC=""
 while [ $# -gt 0 ]; do
@@ -60,6 +63,8 @@ while [ $# -gt 0 ]; do
     --new-branch) NEW_BRANCH=1 ;;
     --check)      CHECK_ONLY=1 ;;
     --notify-test) NOTIFY_TEST=1 ;;
+    --stop-after)  STOP_AFTER=on ;;
+    --no-stop-after) STOP_AFTER=off ;;
     --preflight)  PREFLIGHT_ONLY=1 ;;
     --adopt=*)    ADOPT="${1#--adopt=}"; [ -n "$ADOPT" ] || ADOPT=x ;;
     --adopt)      ADOPT="${2:-x}"; if [ $# -gt 1 ]; then shift; fi ;;
@@ -703,6 +708,19 @@ run_preflight() {
   return 1
 }
 
+# ---- --stop-after: yêu cầu lần chạy đang chạy dừng ở ranh giới task ----
+STOP_FILE="$LOG_DIR/stop-after"
+if [ -n "$STOP_AFTER" ]; then
+  if [ "$STOP_AFTER" = on ]; then
+    mkdir -p "$LOG_DIR"; date '+%Y-%m-%d %H:%M:%S' > "$STOP_FILE"
+    echo "🛑 Đã yêu cầu dừng: lần chạy đang chạy trong $(pwd) sẽ dừng sau khi task hiện tại xong (commit),"
+    echo "   trước khi bắt đầu task kế tiếp. Huỷ: auto.sh --no-stop-after"
+  else
+    rm -f "$STOP_FILE"; echo "↩️  Đã huỷ yêu cầu dừng"
+  fi
+  exit 0
+fi
+
 # ---- --notify-test ----
 if [ "$NOTIFY_TEST" -eq 1 ]; then
   if [ -z "${NTFY_TOPIC:-}" ]; then echo "ℹ️  Chưa đặt NTFY_TOPIC — chỉ hiện thông báo trên Mac"; fi
@@ -844,6 +862,7 @@ fi
 
 # ---- Tóm tắt cuối mỗi lần chạy ----
 RUN_START=$(date +%s)
+rm -f "$STOP_FILE"   # yêu cầu dừng còn sót từ lần chạy trước không áp dụng cho lần này
 STOP_REASON=""
 STOP_DETAILS=""
 PREFLIGHT_REPORT=""
@@ -1020,6 +1039,13 @@ for N in $(seq 1 "$TOTAL"); do
     T_STATUS[N]="SKIP (đã commit trước đó)"
     echo "⏭️  Bỏ qua Task $N (đã có commit trên branch này)"
     continue
+  fi
+  if [ -f "$STOP_FILE" ]; then
+    rm -f "$STOP_FILE"
+    STOP_REASON="Dừng theo yêu cầu (auto.sh --stop-after) trước Task $N — chạy lại auto.sh để làm tiếp"
+    echo "🛑 $STOP_REASON"
+    notify "Đã dừng theo yêu cầu trước Task $N" default stop_sign
+    exit 0
   fi
 
   T_BEGIN[N]=$(date +%s); T_STATUS[N]="FAIL"; T_TRIES[N]=0
