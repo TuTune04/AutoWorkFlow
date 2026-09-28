@@ -211,7 +211,7 @@ fi
 CODER_RC=0
 
 # Agent chỉ được sửa file; script tự test, review và commit "Task N".
-GIT_RULE="Do not run git commands that change the index, history or branch (git add, commit, stash, reset, checkout, switch, restore, rebase, merge, cherry-pick, push); the script stages and commits for you. Read-only git commands (status, diff, log, show) are fine."
+GIT_RULE="Do not run git commands that change the index, history or branch (git add, commit, stash, reset, checkout, switch, restore, rebase, merge, cherry-pick, push); the script stages and commits for you. Only these read-only git commands are allowed: git status, git diff, git log, git show, git ls-files, git grep (use git grep <pattern> <path> to search code)."
 
 snapshot_git() {  # ghi lại trạng thái git trước khi agent chạy
   HEAD_BEFORE=$(git rev-parse HEAD)
@@ -348,7 +348,7 @@ allowed_cmds() { printf '%s\n' "$AGY_ALLOWED_CMDS" | tr ',' '\n' | sed -E 's/^[[
 first_exe()    { local w; for w in $1; do case "$w" in *=*) ;; *) echo "$w"; return 0 ;; esac; done; }
 # Quy tắc hẹp cho agy: chỉ lệnh này, không cho nối lệnh khác bằng ; & | ` $
 # git: chỉ các lệnh con chỉ đọc (agent không được commit/push/reset — script làm việc đó)
-GIT_READONLY_RULE='command(regex:^git (status|diff|log|show|ls-files)( [^;&|`$]*)?$)'
+GIT_READONLY_RULE='command(regex:^git (status|diff|log|show|ls-files|grep)( [^;&|`$]*)?$)'
 cmd_rule()     {
   if [ "$1" = git ]; then printf '%s' "$GIT_READONLY_RULE"; return; fi
   printf 'command(regex:^%s( [^;&|`$]*)?$)' "$(printf '%s' "$1" | sed 's/[].[\*^$()+?{}|]/\\&/g')"
@@ -1030,7 +1030,7 @@ for N in $(seq 1 "$TOTAL"); do
     # tính là một lần thử và chạy lại kèm lời nhắc, không dừng cả pipeline.
     if [ "$ACTIVE_CODER" = agy ] && grep -qiE "$DIAG_PERM_RE" "$CODE_LOG" && preflight_cached; then
       DENIED=$(agy_denied_commands)
-      DENY_NOTE="IMPORTANT: your previous run was stopped because a command was denied${DENIED:+: $(printf '%s' "$DENIED" | tr '\n' ' ')}. Every command must be ONE plain command from the allowed list, with no ; & | \$ or backticks anywhere (also not inside python3 -c code). To run multi-statement code, write a script file with the file-writing tool and run it; to search or read files, use the file tools."
+      DENY_NOTE="IMPORTANT: your previous run was stopped because a command was denied${DENIED:+: $(printf '%s' "$DENIED" | tr '\n' ' ')}. Every command must be ONE plain command from the allowed list, with no ; & | \$ or backticks anywhere (also not inside python3 -c code). To search code use git grep <pattern> <path> or git ls-files <path>; to read files use the file tools; to run multi-statement code, write a script file with the file-writing tool and run it."
       echo "[auto.sh] lệnh bị từ chối, quyền vẫn đạt preflight → agent dùng lệnh sai dạng: ${DENIED:-không xác định được lệnh}" >> "$CODE_LOG"
       echo "⚠️  Task $N lần $TRY: agent chạy lệnh sai dạng bị từ chối (${DENIED:-không rõ lệnh}) — chạy lại kèm nhắc nhở"
       if [ -z "$(git status --porcelain)" ]; then
