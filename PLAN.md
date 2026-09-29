@@ -202,6 +202,11 @@ Acceptance criteria (tests):
 - After the update that starts a standPunch (frame 0), exactly `moveTotalFrames(standPunch)` (15) further updates return the fighter to `idle`; input is ignored meanwhile (holding right doesn't move).
 - Only one air attack per jump; `usedAirAttack` resets on landing.
 
+Decision (supersedes the Task 4 "ignore attack buttons" behaviour): this task MAY edit the Task 4 test
+`'ignores attack buttons and cancels opposing directions'` in `tests/fighter-movement.test.js` — remove
+`punchPressed`/`kickPressed` from its input so it only checks that opposing directions cancel (x stays 128,
+vx 0, state `idle`). Attack-on-press behaviour is covered by this task's tests. Do not change any other earlier test.
+
 ## Task 6: Pushboxes and facing
 
 Files: `src/game/physics.js`, `tests/physics.test.js`.
