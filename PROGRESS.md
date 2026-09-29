@@ -32,3 +32,10 @@
 - Implemented ground and air attacks, input priority, whiff events, recovery, and landing cancellation.
 - Added attack tests and updated only the permitted opposing-direction movement test.
 - Verified npm test --silent passes: 58 tests across 5 files.
+
+## Task 6: Pushboxes and facing
+- Added standing and crouching hurtboxes with local-to-world conversion.
+- Implemented horizontal pushbox separation with shared displacement, wall constraints, and deterministic ties.
+- Added facing updates for grounded idle, walking, crouching, and blocking fighters.
+- Added physics tests covering separation, walls, vertical clearance, hurtboxes, and facing restrictions.
+- Verified npm test --silent passes: 6 test files and 85 tests.
