@@ -52,3 +52,10 @@
 - Added KO and time-over scoring, draw handling, round resets, and match winner events.
 - Added tests for exact phase timing, input suppression, combat events, resets, and match outcomes.
 - Verified npm test --silent passes: 8 test files and 124 tests.
+
+## Task 9: Game scene state machine
+- Implemented the title, fight, and victory scene state machine with scene frame tracking.
+- Added fresh match creation, match event forwarding, and a 60-frame victory confirmation delay.
+- Added mute toggling in every scene and Escape handling during fights.
+- Added scene transition, input forwarding, timing boundary, and event preservation tests.
+- Verified npm test --silent passes: 133 tests across 9 test files.
