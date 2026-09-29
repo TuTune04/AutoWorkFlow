@@ -93,3 +93,10 @@
 - Added deterministic noise generation with a reusable buffer and event playback support.
 - Added fake AudioContext tests covering playback, scheduling, muting, unknown events, and noise reuse.
 - Verified npm test --silent passes: 15 test files and 211 tests.
+
+## Task 15: Browser wiring and README
+- Wired keyboard snapshots, fixed-step game updates, Canvas rendering, mute state and sound events in the browser entry point.
+- Enabled audio on the first key or pointer press and disabled image smoothing.
+- Added a short English README with setup, Codespaces port, controls and project layout.
+- Added Node import coverage and a headless P1 victory test with alternating punches in range and rendering every 100 frames.
+- Verified npm test --silent (228 tests passed) and npm run build; manual browser play was not performed.
