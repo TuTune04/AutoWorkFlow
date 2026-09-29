@@ -59,3 +59,10 @@
 - Added mute toggling in every scene and Escape handling during fights.
 - Added scene transition, input forwarding, timing boundary, and event preservation tests.
 - Verified npm test --silent passes: 133 tests across 9 test files.
+
+## Task 10: Fixed-timestep loop
+- Implemented Task 10's pure fixed-timestep stepper with configurable frame duration and catch-up limit.
+- Added accumulation, backlog discarding, and zero-time handling for negative or NaN elapsed values.
+- Added six tests covering default timing, partial frames, custom settings, and catch-up behavior.
+- Preserved the specified 60 FPS default; the two 8 ms example uses a 16 ms custom step because 16 ms is below one default frame.
+- Ran npm test --silent successfully: all 139 tests across 10 files passed.
