@@ -39,3 +39,9 @@
 - Added facing updates for grounded idle, walking, crouching, and blocking fighters.
 - Added physics tests covering separation, walls, vertical clearance, hurtboxes, and facing restrictions.
 - Verified npm test --silent passes: 6 test files and 85 tests.
+
+## Task 7: Combat resolution (hits, blocks, KO)
+- Implemented active hitboxes and stance-based blocking in combat.js.
+- Added simultaneous hit resolution with damage, stun, knockback, single-hit enforcement, and KO events.
+- Added combat tests covering trades, block levels, misses, and continued falling after airborne KO.
+- Ran npm test --silent successfully: all 110 tests across 7 test files passed.
