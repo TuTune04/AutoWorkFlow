@@ -86,3 +86,10 @@
 - Implemented title and victory screens with fighter sprites, blinking start text, final scores, and a delayed return prompt.
 - Added scene dispatch and a mute marker to the renderer.
 - Added screen tests; npm test --silent passes all 206 tests across 14 files.
+
+## Task 14: Sound effects (Web Audio)
+- Added synth recipes for all ten sound events, including sequential KO tones.
+- Implemented lazy Web Audio initialization, mute control, frequency ramps, and fading gain envelopes.
+- Added deterministic noise generation with a reusable buffer and event playback support.
+- Added fake AudioContext tests covering playback, scheduling, muting, unknown events, and noise reuse.
+- Verified npm test --silent passes: 15 test files and 211 tests.
