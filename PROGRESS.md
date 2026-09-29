@@ -12,3 +12,9 @@
 - Added tests for intersections, separation, edge contact, containment, and both facing directions.
 - Kept all existing tests unchanged and limited implementation to Task 2.
 - Verified npm test --silent passes: 19 tests across 2 test files.
+
+## Task 3: Input mapping
+- Added pure player and menu input mappings with all bound keyboard codes.
+- Implemented neutral input, attack and menu press edges, and opposing-direction cancellation.
+- Added the DOM keyboard adapter with default prevention, blur clearing, and independent frame snapshots.
+- Added input acceptance tests; npm test --silent passes all 33 tests across 3 files.
