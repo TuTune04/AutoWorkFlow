@@ -109,9 +109,9 @@ describe('fighter movement', () => {
       y: GROUND_Y, vy: 0, onGround: true, usedAirAttack: false });
   });
 
-  it('ignores attack buttons and cancels opposing directions', () => {
+  it('cancels opposing directions', () => {
     const f = createFighter(0, 128, 1);
-    updateFighter(f, input({ left: true, right: true, punchPressed: true, kickPressed: true }));
+    updateFighter(f, input({ left: true, right: true }));
     expect(f).toMatchObject({ x: 128, vx: 0, state: 'idle', attack: null });
   });
 });

@@ -2,6 +2,7 @@ import {
   AIR_SPEED, FIGHTER_WIDTH, FRICTION, GRAVITY, GROUND_Y,
   JUMP_VELOCITY, MAX_HEALTH, STAGE_LEFT, STAGE_RIGHT, WALK_SPEED,
 } from './constants.js';
+import { attackPhase, selectMove } from './moves.js';
 
 export function createFighter(playerIndex, x, facing) {
   return {
@@ -19,6 +20,14 @@ export function setState(f, state) {
 export function updateFighter(f, input) {
   const events = [];
   let state = f.state;
+  const button = input.punchPressed ? 'punch' : input.kickPressed ? 'kick' : null;
+
+  function startAttack(airborne) {
+    const move = selectMove(button, f.crouching, airborne);
+    f.attack = { moveId: move.id, frame: 0, hasHit: false };
+    state = 'attack';
+    events.push({ type: 'whiff', player: f.playerIndex, moveId: move.id });
+  }
 
   if (state === 'hitstun' || state === 'blockstun') {
     f.stun = Math.max(0, f.stun - 1);
@@ -26,11 +35,24 @@ export function updateFighter(f, input) {
     if (f.stun === 0) state = f.onGround ? 'idle' : 'jump';
   } else if (state === 'ko') {
     f.vx *= FRICTION;
+  } else if (state === 'attack') {
+    f.attack.frame++;
+    if (attackPhase(f.attack) === 'done') {
+      f.attack = null;
+      f.crouching = f.onGround && Boolean(input.down);
+      state = f.onGround ? (f.crouching ? 'crouch' : 'idle') : 'jump';
+    }
+  } else if (!f.onGround && state === 'jump' && !f.usedAirAttack && button) {
+    startAttack(true);
+    f.usedAirAttack = true;
   } else if (f.onGround && ['idle', 'walk', 'crouch', 'block'].includes(state)) {
     const dir = Number(Boolean(input.right)) - Number(Boolean(input.left));
     f.crouching = false;
     f.vx = 0;
-    if (input.block) {
+    if (button) {
+      f.crouching = Boolean(input.down);
+      startAttack(false);
+    } else if (input.block) {
       state = 'block';
       f.crouching = input.down;
     } else if (input.up) {
@@ -59,7 +81,11 @@ export function updateFighter(f, input) {
       f.vy = 0;
       f.onGround = true;
       f.usedAirAttack = false;
-      if (state === 'jump') state = 'idle';
+      if (state === 'attack') {
+        f.attack = null;
+        f.crouching = false;
+        state = 'idle';
+      } else if (state === 'jump') state = 'idle';
       events.push({ type: 'land', player: f.playerIndex });
     }
   }

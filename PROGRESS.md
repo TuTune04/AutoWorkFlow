@@ -25,3 +25,10 @@
 - Added stun recovery and KO friction while leaving attack behavior for a later task.
 - Added movement tests covering input priorities, landing events, stun recovery, and state transitions.
 - Ran npm test --silent successfully: all 48 tests passed across 4 test files.
+
+## Task 5: Move data and attack states
+- Added all six moves with their specified frame data, damage, stun, levels, and hitboxes.
+- Added move selection, total duration, and attack phase helpers.
+- Implemented ground and air attacks, input priority, whiff events, recovery, and landing cancellation.
+- Added attack tests and updated only the permitted opposing-direction movement test.
+- Verified npm test --silent passes: 58 tests across 5 files.
