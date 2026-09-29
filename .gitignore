@@ -1,3 +1,5 @@
 .auto-logs/
 REVIEW.md
 TASK_SUMMARY.md
+node_modules/
+dist/
