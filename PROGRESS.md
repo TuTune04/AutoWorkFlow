@@ -73,3 +73,10 @@
 - Cached sprite data and horizontal drawing runs, and mapped fighter states and attacks to animated poses.
 - Added sprite tests covering silhouettes, palette indices, run reconstruction, caching, outlines, and pose selection.
 - Verified npm test --silent passes: 11 test files and 178 tests.
+
+## Task 12: HUD layout and fight renderer
+- Added pure HUD helpers for health fills, timer text, and round-win pips.
+- Implemented the fight renderer with a procedural rooftop backdrop, pixel floor, mirrored sprites, and player HUD.
+- Added Vietnamese round, fight, KO, time-up, and draw overlay strings.
+- Added a recording canvas mock and tests for HUD layout, rendering, mirroring, and context restoration.
+- Ran npm test --silent successfully: all 188 tests across 13 test files passed.
