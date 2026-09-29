@@ -1,4 +1,13 @@
 export const STRINGS = {
+  title: 'PIXEL FIGHTER',
+  subtitle: 'Đối kháng 2 người',
+  pressStart: 'Nhấn ENTER để bắt đầu',
+  controlsP1: 'P1: W A S D  ·  F đấm  ·  G đá  ·  H đỡ',
+  controlsP2: 'P2: Phím mũi tên  ·  , đấm  ·  . đá  ·  / đỡ',
+  muteHint: 'M: tắt/bật âm thanh  ·  ESC: về menu',
+  wins: name => `${name} CHIẾN THẮNG!`,
+  backToTitle: 'Nhấn ENTER để về màn hình chính',
+  muted: 'TẮT TIẾNG',
   round: n => `HIỆP ${n}`,
   fight: 'ĐÁNH!',
   ko: 'K.O.',

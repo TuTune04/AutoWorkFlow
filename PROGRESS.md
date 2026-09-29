@@ -80,3 +80,9 @@
 - Added Vietnamese round, fight, KO, time-up, and draw overlay strings.
 - Added a recording canvas mock and tests for HUD layout, rendering, mirroring, and context restoration.
 - Ran npm test --silent successfully: all 188 tests across 13 test files passed.
+
+## Task 13: Title and victory screens + Vietnamese strings
+- Added Vietnamese title, control hints, victory messages, and mute text.
+- Implemented title and victory screens with fighter sprites, blinking start text, final scores, and a delayed return prompt.
+- Added scene dispatch and a mute marker to the renderer.
+- Added screen tests; npm test --silent passes all 206 tests across 14 files.

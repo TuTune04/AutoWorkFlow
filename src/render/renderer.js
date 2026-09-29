@@ -2,6 +2,25 @@ import { FPS, GROUND_Y, HEIGHT, WIDTH } from '../game/constants.js';
 import { STRINGS } from '../game/strings.js';
 import { HEALTH_BAR, healthBarFill, roundPips, timerText } from './hud.js';
 import { FIGHTER_STYLES, generateSprite, poseForFighter, spriteToRuns } from './sprites.js';
+import { drawTitle, drawVictory } from './screens.js';
+
+export function render(ctx, game) {
+  switch (game.scene) {
+    case 'title': drawTitle(ctx, game); break;
+    case 'fight': drawFight(ctx, game.match); break;
+    case 'victory': drawVictory(ctx, game); break;
+  }
+  if (game.muted) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff4e4';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(STRINGS.muted, WIDTH - 4, 4);
+    ctx.restore();
+  }
+}
 
 function drawBackdrop(ctx) {
   ctx.fillStyle = '#20283e';
