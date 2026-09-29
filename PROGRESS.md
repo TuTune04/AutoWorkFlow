@@ -45,3 +45,10 @@
 - Added simultaneous hit resolution with damage, stun, knockback, single-hit enforcement, and KO events.
 - Added combat tests covering trades, block levels, misses, and continued falling after airborne KO.
 - Ran npm test --silent successfully: all 110 tests across 7 test files passed.
+
+## Task 8: Round and match logic
+- Added pure round and match logic with intro, fight, round-end, and over phases.
+- Integrated fighter updates, collision separation, combat, facing, and fight-only timer countdown.
+- Added KO and time-over scoring, draw handling, round resets, and match winner events.
+- Added tests for exact phase timing, input suppression, combat events, resets, and match outcomes.
+- Verified npm test --silent passes: 8 test files and 124 tests.
