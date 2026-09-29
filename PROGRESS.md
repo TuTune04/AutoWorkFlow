@@ -66,3 +66,10 @@
 - Added six tests covering default timing, partial frames, custom settings, and catch-up behavior.
 - Preserved the specified 60 FPS default; the two 8 ms example uses a 16 ms custom step because 16 ms is below one default frame.
 - Ran npm test --silent successfully: all 139 tests across 10 files passed.
+
+## Task 11: Procedural pixel sprites
+- Implemented all 16 procedural fighter poses with 48×64 indexed sprites and one-pixel outlines.
+- Added compatible Rồng and Hổ palettes with distinct gi, hair, and headband colors.
+- Cached sprite data and horizontal drawing runs, and mapped fighter states and attacks to animated poses.
+- Added sprite tests covering silhouettes, palette indices, run reconstruction, caching, outlines, and pose selection.
+- Verified npm test --silent passes: 11 test files and 178 tests.
