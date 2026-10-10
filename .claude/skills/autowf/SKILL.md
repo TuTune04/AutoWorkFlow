@@ -6,7 +6,7 @@ argument-hint: "[mô tả dự án | continue | stop | check]"
 
 # autowf (Claude Code)
 
-`SCRIPT` = `scripts/auto.sh` cạnh file này (đường dẫn tuyệt đối từ "Base directory"). Script tự làm hết: branch
+`SCRIPT` = `bash <đường dẫn tuyệt đối từ "Base directory">/scripts/auto.sh` (luôn gọi qua `bash`: trình cài có thể làm mất quyền thực thi). Script tự làm hết: branch
 `auto/*`, planner viết PLAN.md, coder làm từng task, tự chạy `TEST_CMD`, reviewer chấm, sửa tối đa `MAX_TRIES` vòng,
 commit `Task N: <tiêu đề>`. Bộ agent ở `defaults.env` (Opus plan, Codex code, Sonnet review; chưa có Codex thì Claude
 code thay); `.autowf.env` ở repo đích ghi đè. Đối số: `$ARGUMENTS`.

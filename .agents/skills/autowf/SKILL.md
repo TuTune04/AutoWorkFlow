@@ -5,7 +5,7 @@ description: Chạy pipeline tự động viết phần mềm theo từng task, 
 
 # autowf (Codex / Antigravity)
 
-`SCRIPT` = `scripts/auto.sh` cạnh file này (đường dẫn tuyệt đối của thư mục chứa SKILL.md). Script tự làm hết: branch
+`SCRIPT` = `bash <thư mục chứa SKILL.md>/scripts/auto.sh` (luôn gọi qua `bash`: trình cài skill có thể làm mất quyền thực thi). Script tự làm hết: branch
 `auto/*`, planner viết PLAN.md, coder làm từng task, tự chạy `TEST_CMD`, reviewer chấm, sửa tối đa `MAX_TRIES` vòng,
 commit `Task N: <tiêu đề>`. Bộ agent ở `defaults.env` (Codex plan, agy code — chưa có agy thì Codex code —, Codex
 review model `luna`, tự quy ra model luna mới nhất); `.autowf.env` ở repo đích ghi đè.
