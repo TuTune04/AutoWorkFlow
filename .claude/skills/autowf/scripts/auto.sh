@@ -451,10 +451,11 @@ codex_exec() {  # <prompt> [model] [sandbox] [tham số thêm...]
   codex "${args[@]}" "$@" -- "$prompt"
 }
 
-# Claude Code làm coding agent: được sửa file và chạy lệnh (git commit của nó bị undo_agent_git đưa về cây làm việc)
+# Claude Code làm coding agent: được sửa file và chạy lệnh (git commit của nó bị undo_agent_git đưa về cây làm việc).
+# Prompt phải đứng ngay sau -p: --allowedTools nhận nhiều giá trị và sẽ nuốt tham số đứng sau nó.
 claude_coder() {  # <prompt>
-  claude -p ${CODER_MODEL:+--model "$CODER_MODEL"} --permission-mode acceptEdits \
-    --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,Bash" "$1"
+  claude -p "$1" ${CODER_MODEL:+--model "$CODER_MODEL"} --permission-mode acceptEdits \
+    --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,Bash"
 }
 
 run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CODER_RC
@@ -1309,10 +1310,10 @@ run_role() {
   local agent="$1" model="$2" mode="$3" prompt="$4" in="$5" out="$6"
   case "$agent:$mode" in
     claude:plan)
-      claude -p ${model:+--model "$model"} --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" "$prompt" \
+      claude -p "$prompt" ${model:+--model "$model"} --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" \
         < /dev/null > "$out" 2>&1 ;;
     claude:review)
-      claude -p ${model:+--model "$model"} "$prompt" < "$in" > "$out" 2>&1 ;;
+      claude -p "$prompt" ${model:+--model "$model"} < "$in" > "$out" 2>&1 ;;
     codex:plan)
       codex_exec "$prompt" "$model" workspace-write < /dev/null > "$out" 2>&1 ;;
     codex:review)  # tài liệu + yêu cầu qua stdin (diff có thể vượt giới hạn độ dài một tham số)
