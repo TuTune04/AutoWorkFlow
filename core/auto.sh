@@ -1551,7 +1551,11 @@ for N in $(seq 1 "$TOTAL"); do
     run_coder_waiting "$ACTIVE_CODER" "$PROMPT" "$CODE_LOG"
 
     # Agent dự phòng khi agent chính lỗi đăng nhập/quyền
-    if [ -n "$FALLBACK_CODER" ] && [ "$ACTIVE_CODER" != "$FALLBACK_CODER" ] && grep -qiE "$CODER_AUTH_RE" "$CODE_LOG"; then
+    # Chỉ khi coder thất bại thật (thoát lỗi hoặc không sửa file nào) và thông báo đăng nhập/quyền nằm ở cuối log:
+    # output của lệnh agent chạy (vd. "unauthenticated requests to the HF Hub") không được tính là agent lỗi đăng nhập.
+    if [ -n "$FALLBACK_CODER" ] && [ "$ACTIVE_CODER" != "$FALLBACK_CODER" ] \
+       && { [ "$CODER_RC" -ne 0 ] || [ -z "$(git status --porcelain)" ]; } \
+       && tail -n 30 "$CODE_LOG" | grep -qiE "$CODER_AUTH_RE"; then
       echo "[auto.sh] $ACTIVE_CODER lỗi đăng nhập/quyền → chạy lại Task $N bằng $FALLBACK_CODER" >> "$CODE_LOG"
       echo "⚠️  $ACTIVE_CODER lỗi đăng nhập/quyền (xem $CODE_LOG) → chuyển sang agent dự phòng $FALLBACK_CODER"
       notify "$ACTIVE_CODER lỗi đăng nhập/quyền, chuyển sang $FALLBACK_CODER"
