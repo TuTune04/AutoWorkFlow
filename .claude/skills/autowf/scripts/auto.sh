@@ -1,25 +1,34 @@
 #!/bin/bash
-# auto.sh — Claude Opus lên plan, coding agent (mặc định Codex CLI `codex`) viết code, Claude Sonnet review.
+# auto.sh — một agent lên plan, một coding agent viết code, một agent review; chọn bộ agent bằng PROFILE.
+# Mặc định (profile premium): Claude Opus lên plan, Codex CLI viết code, Claude Sonnet review.
 #
 # Cách dùng:
-#   ./auto.sh "mô tả dự án"   chưa có PLAN.md: Claude viết plan rồi chạy
+#   ./auto.sh "mô tả dự án"   chưa có PLAN.md: PLANNER viết plan rồi chạy
 #   ./auto.sh                 đã có PLAN.md: chạy (hoặc chạy tiếp) theo plan
-#   ./auto.sh --plan-only "mô tả dự án"   chỉ để Claude viết + commit PLAN.md rồi thoát (duyệt plan trước khi code)
+#   ./auto.sh --plan-only "mô tả dự án"   chỉ để PLANNER viết + commit PLAN.md rồi thoát (duyệt plan trước khi code)
 #   ./auto.sh --check         chỉ kiểm tra công cụ, PLAN.md, git và git hook rồi thoát
 #   ./auto.sh --new-branch    ép tạo branch auto/* mới thay vì làm tiếp branch auto/* hiện tại
 #   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) và git hook rồi thoát
 #   ./auto.sh --stop-after    (từ tab khác, trong repo) lần chạy đang chạy dừng sau khi task hiện tại xong;
 #                             huỷ yêu cầu: ./auto.sh --no-stop-after
+#   ./auto.sh --profiles      liệt kê profile (có sẵn + riêng) và profile đang dùng rồi thoát
 #   ./auto.sh --notify-test   gửi thử một thông báo (Mac + ntfy nếu có NTFY_TOPIC) rồi thoát
 #   ./auto.sh --adopt N       nhận Task N đã làm/kiểm tra bằng tay: chạy TEST_CMD rồi commit thay đổi (hoặc
 #                             đổi tên commit HEAD) thành "Task N: <tiêu đề>" để lần chạy sau bỏ qua
 #
 # Biến cấu hình: đặt trong .autowf.env ở gốc repo, hoặc qua env (env được ưu tiên hơn file):
-#   CODER=codex            coding agent: codex | agy | gemini | ...
+#   PROFILE=premium        bộ agent + model cho 3 vai trò; đặt riêng từng biến dưới đây sẽ thắng giá trị của profile
+#                            premium: PLANNER=claude (claude-opus-5-5), CODER=codex, REVIEWER=claude (claude-sonnet-5-5)
+#                            free:    PLANNER=codex, CODER=agy (Antigravity/Gemini), REVIEWER=codex (luna)
+#                          profile riêng: .autowf/profiles/<tên>.env (repo) hoặc ~/.config/autowf/profiles/<tên>.env
+#   PLANNER=               agent viết PLAN.md: claude | codex | gemini | agy
+#   CODER=                 coding agent: codex | claude | agy | gemini | ...
+#   REVIEWER=              agent review: claude | codex | gemini | agy (chỉ đọc; sửa file sẽ bị bỏ)
+#   PLAN_MODEL= CODER_MODEL= REVIEW_MODEL=   model cho từng vai trò (rỗng = mặc định của agent đó)
 #   FALLBACK_CODER=        agent dự phòng khi CODER lỗi đăng nhập/quyền (ví dụ: gemini)
-#   PLAN_MODEL=claude-opus-5-5      model Claude viết PLAN.md
-#   REVIEW_MODEL=claude-sonnet-5-5  model Claude review
-#   CODEX_MODEL=           model của Codex (rỗng = mặc định của codex CLI)
+#   GIT_USER_NAME= GIT_USER_EMAIL=   tác giả mọi commit (rỗng = git config user.name/email); không được trông
+#                          như AI/bot, và commit không bao giờ có trailer Co-authored-by
+#   CODEX_MODEL=           model của Codex khi làm coder (cũ; dùng khi CODER_MODEL rỗng)
 #   CODEX_SANDBOX=workspace-write   sandbox của codex exec: workspace-write | danger-full-access
 #   CODEX_NETWORK=1        cho Codex truy cập mạng trong sandbox workspace-write (cài package...); 0 = chặn
 #   CODEX_ARGS=            tham số thêm cho `codex exec` (vd. "--dangerously-bypass-approvals-and-sandbox"
@@ -40,7 +49,8 @@
 #   AGY_TOKEN_WARN=3000000 cảnh báo khi tổng token input của agy trong một task vượt ngưỡng (0 = tắt);
 #                          số lần gọi model / token của agy từng task ghi trong summary.md
 # Ví dụ:
-#   REVIEW_MODEL=haiku ./auto.sh
+#   PROFILE=free ./auto.sh
+#   REVIEWER=codex REVIEW_MODEL= ./auto.sh
 #   CODER=agy ./auto.sh
 #   FALLBACK_CODER=gemini MAX_TRIES=5 ./auto.sh
 #
@@ -66,6 +76,7 @@ CHECK_ONLY=0
 PREFLIGHT_ONLY=0
 PLAN_ONLY=0
 NOTIFY_TEST=0
+LIST_PROFILES=0
 STOP_AFTER=""
 ADOPT=""
 DESC=""
@@ -78,6 +89,7 @@ while [ $# -gt 0 ]; do
     --no-stop-after) STOP_AFTER=off ;;
     --preflight)  PREFLIGHT_ONLY=1 ;;
     --plan-only)  PLAN_ONLY=1 ;;
+    --profiles)   LIST_PROFILES=1 ;;
     --adopt=*)    ADOPT="${1#--adopt=}"; [ -n "$ADOPT" ] || ADOPT=x ;;
     --adopt)      ADOPT="${2:-x}"; if [ $# -gt 1 ]; then shift; fi ;;
     -h|--help)    usage; exit 0 ;;
@@ -112,22 +124,87 @@ if [ -d .venv/bin ] && [ -z "${VIRTUAL_ENV:-}" ]; then
   esac
 fi
 
-# ---- Cấu hình: mặc định < .autowf.env < biến môi trường ----
-CONFIG_VARS="NTFY_TOPIC NTFY_SERVER CODER FALLBACK_CODER PLAN_MODEL REVIEW_MODEL MAX_TRIES MAX_EXTRA_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS AGY_TOKEN_WARN CODEX_MODEL CODEX_SANDBOX CODEX_NETWORK CODEX_ARGS"
-if [ -f .autowf.env ]; then
-  ENV_OVERRIDES=""
+# ---- Cấu hình: mặc định < profile < .autowf.env < biến môi trường ----
+CONFIG_VARS="PROFILE PLANNER CODER REVIEWER NTFY_TOPIC NTFY_SERVER FALLBACK_CODER PLAN_MODEL CODER_MODEL REVIEW_MODEL MAX_TRIES MAX_EXTRA_TRIES MAX_WAIT_HOURS DIFF_LIMIT AGY_ALLOWED_CMDS AGY_ALLOW_MCP REQUIRE_CMD REQUIRE_WAIT_MINS AGY_TOKEN_WARN CODEX_MODEL CODEX_SANDBOX CODEX_NETWORK CODEX_ARGS GIT_USER_NAME GIT_USER_EMAIL"
+config_snapshot() {  # in các biến cấu hình đang được đặt, dạng gán lại được bằng eval
+  local v
   for v in $CONFIG_VARS; do
-    if [ -n "${!v+x}" ]; then ENV_OVERRIDES+="$v=$(printf '%q' "${!v}")"$'\n'; fi
+    if [ -n "${!v+x}" ]; then printf '%s=%q\n' "$v" "${!v}"; fi
   done
+}
+# Profile = bộ agent + model cho 3 vai trò (plan / code / review). Có sẵn:
+#   premium  Claude Opus viết plan, Codex code, Claude Sonnet review (mặc định; cần gói Claude trả phí)
+#   free     Codex viết plan, Antigravity (Gemini) code, Codex (luna) review — dùng hạn mức miễn phí
+# Thêm profile riêng: file <tên>.env trong .autowf/profiles/ (ở repo) hoặc ~/.config/autowf/profiles/,
+# gán các biến PLANNER/CODER/REVIEWER/PLAN_MODEL/CODER_MODEL/REVIEW_MODEL...; dùng bằng PROFILE=<tên>.
+BUILTIN_PROFILES="premium free"
+profile_file() {  # <tên> → đường dẫn file profile riêng (rỗng nếu không có)
+  local d
+  for d in .autowf/profiles "$HOME/.config/autowf/profiles"; do
+    if [ -f "$d/$1.env" ]; then echo "$d/$1.env"; return 0; fi
+  done
+}
+load_profile() {  # <tên> — trả về 1 nếu không có profile này
+  local f
+  f=$(profile_file "$1")
+  if [ -n "$f" ]; then
+    # shellcheck disable=SC1090
+    . "$f"; PROFILE_SRC="$f"; return 0
+  fi
+  case "$1" in
+    premium) PLANNER=claude; PLAN_MODEL=claude-opus-5-5
+             CODER=codex;    CODER_MODEL=
+             REVIEWER=claude; REVIEW_MODEL=claude-sonnet-5-5 ;;
+    free)    PLANNER=codex;  PLAN_MODEL=
+             CODER=agy;      CODER_MODEL=
+             REVIEWER=codex; REVIEW_MODEL=luna ;;
+    *) return 1 ;;
+  esac
+  PROFILE_SRC="có sẵn"
+}
+list_profiles() {
+  local d f
+  echo "Profile có sẵn: premium (Claude plan, Codex code, Claude review), free (Codex plan, agy code, Codex review)"
+  for d in .autowf/profiles "$HOME/.config/autowf/profiles"; do
+    for f in "$d"/*.env; do
+      if [ -f "$f" ]; then echo "Profile riêng: $(basename "$f" .env) ($f)"; fi
+    done
+  done
+}
+ENV_OVERRIDES=$(config_snapshot)
+if [ -f .autowf.env ]; then
   # shellcheck disable=SC1091
   . ./.autowf.env
   eval "$ENV_OVERRIDES"
 fi
+USER_CONFIG=$(config_snapshot)   # cấu hình người dùng đặt rõ — thắng giá trị của profile
+PROFILE="${PROFILE:-premium}"
+PROFILE_SRC=""
+if ! load_profile "$PROFILE"; then
+  echo "❌ Không có profile '$PROFILE'."; list_profiles; exit 1
+fi
+eval "$USER_CONFIG"
+# Đổi agent của một vai trò mà không đặt model → model của profile (dành cho agent khác) không còn đúng: bỏ
+user_set() { grep -q "^$1=" <<< "$USER_CONFIG"; }
+for pair in PLANNER:PLAN_MODEL CODER:CODER_MODEL REVIEWER:REVIEW_MODEL; do
+  if user_set "${pair%%:*}" && ! user_set "${pair#*:}"; then printf -v "${pair#*:}" '%s' ""; fi
+done
+PLANNER="${PLANNER:-claude}"
 CODER="${CODER:-codex}"
+REVIEWER="${REVIEWER:-claude}"
 FALLBACK_CODER="${FALLBACK_CODER:-}"
-PLAN_MODEL="${PLAN_MODEL:-claude-opus-5-5}"
-REVIEW_MODEL="${REVIEW_MODEL:-claude-sonnet-5-5}"
+PLAN_MODEL="${PLAN_MODEL:-}"
+CODER_MODEL="${CODER_MODEL:-}"
+REVIEW_MODEL="${REVIEW_MODEL:-}"
 CODEX_MODEL="${CODEX_MODEL:-}"
+GIT_USER_NAME="${GIT_USER_NAME:-}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"
+role_desc() { printf '%s%s' "$1" "${2:+ ($2)}"; }  # <agent> <model>
+if [ "$LIST_PROFILES" -eq 1 ]; then
+  list_profiles
+  echo "Đang dùng: $PROFILE ($PROFILE_SRC) — plan: $(role_desc "$PLANNER" "$PLAN_MODEL"), code: $(role_desc "$CODER" "$CODER_MODEL"), review: $(role_desc "$REVIEWER" "$REVIEW_MODEL")"
+  exit 0
+fi
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 CODEX_NETWORK="${CODEX_NETWORK:-1}"
 CODEX_ARGS="${CODEX_ARGS:-}"
@@ -321,7 +398,7 @@ fi
 CODER_RC=0
 
 # Agent chỉ được sửa file; script tự test, review và commit "Task N".
-GIT_RULE="Do not run git commands that change the index, history or branch (git add, commit, stash, reset, checkout, switch, restore, rebase, merge, cherry-pick, push); the script stages and commits for you. Only these read-only git commands are allowed: git status, git diff, git log, git show, git ls-files, git grep (use git grep <pattern> <path> to search code)."
+GIT_RULE="Do not run git commands that change the index, history or branch (git add, commit, stash, reset, checkout, switch, restore, rebase, merge, cherry-pick, push) or git config; the script stages and commits for you. Only these read-only git commands are allowed: git status, git diff, git log, git show, git ls-files, git grep (use git grep <pattern> <path> to search code)."
 
 snapshot_git() {  # ghi lại trạng thái git trước khi agent chạy
   HEAD_BEFORE=$(git rev-parse HEAD)
@@ -360,16 +437,24 @@ Cách xử lý: git stash list; lấy lại bằng git stash pop (nếu đúng l
 }
 
 # codex exec không hỏi quyền (headless); sandbox workspace-write chỉ cho ghi trong repo (và /tmp).
-# CODEX_ARGS tách theo khoảng trắng.
-codex_exec() {  # <prompt>
-  local args=(exec --skip-git-repo-check --color never --sandbox "$CODEX_SANDBOX")
-  [ -z "$CODEX_MODEL" ] || args+=(-m "$CODEX_MODEL")
-  if [ "$CODEX_SANDBOX" = workspace-write ] && [ "$CODEX_NETWORK" = 1 ]; then
+# CODEX_ARGS tách theo khoảng trắng. Prompt "-" = đọc prompt từ stdin.
+codex_exec() {  # <prompt> [model] [sandbox] [tham số thêm...]
+  local model="${2-${CODER_MODEL:-$CODEX_MODEL}}" sandbox="${3:-$CODEX_SANDBOX}" prompt="$1"
+  local args=(exec --skip-git-repo-check --color never --sandbox "$sandbox")
+  shift; [ $# -eq 0 ] || shift; [ $# -eq 0 ] || shift
+  [ -z "$model" ] || args+=(-m "$model")
+  if [ "$sandbox" = workspace-write ] && [ "$CODEX_NETWORK" = 1 ]; then
     args+=(-c sandbox_workspace_write.network_access=true)
   fi
   # shellcheck disable=SC2206
   [ -z "$CODEX_ARGS" ] || args+=($CODEX_ARGS)
-  codex "${args[@]}" -- "$1"
+  codex "${args[@]}" "$@" -- "$prompt"
+}
+
+# Claude Code làm coding agent: được sửa file và chạy lệnh (git commit của nó bị undo_agent_git đưa về cây làm việc)
+claude_coder() {  # <prompt>
+  claude -p ${CODER_MODEL:+--model "$CODER_MODEL"} --permission-mode acceptEdits \
+    --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,Bash" "$1"
 }
 
 run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CODER_RC
@@ -378,7 +463,8 @@ run_coder() {  # <agent> <prompt> <file log>; mã thoát của agent lưu ở CO
   case "$1" in
     agy)    agy -p "$2 $AGY_RULES" ;;
     codex)  codex_exec "$2" ;;
-    gemini) gemini -p "$2" --yolo ;;
+    claude) claude_coder "$2" ;;
+    gemini) gemini ${CODER_MODEL:+-m "$CODER_MODEL"} -p "$2" --yolo ;;
     *)      "$1" -p "$2" ;;
   esac < /dev/null > "$3" 2>&1 || CODER_RC=$?
   [ "$1" != agy ] || record_agy_usage "$3"
@@ -546,7 +632,8 @@ ask_coder() {  # <prompt> <file log> — gọi CODER với đúng prompt này (k
   touch "$LOG_DIR/.coder-start"
   case "$CODER" in
     codex)  codex_exec "$1" ;;
-    gemini) gemini -p "$1" --yolo ;;
+    claude) claude_coder "$1" ;;
+    gemini) gemini ${CODER_MODEL:+-m "$CODER_MODEL"} -p "$1" --yolo ;;
     *)      "$CODER" -p "$1" ;;
   esac < /dev/null > "$2" 2>&1 || CODER_RC=$?
 }
@@ -795,14 +882,62 @@ Cách xử lý: khởi động dịch vụ (vd. docker compose up -d) rồi ch�
 nếu cây còn thay đổi dở: git stash -u (bỏ) hoặc sửa tay rồi autowf --adopt N (giữ)."
 }
 
+# ---- Tác giả commit: chỉ người dùng, không co-author AI ----
+# Tên/email trông như một AI hoặc bot (Claude, Codex, ChatGPT, Copilot, Gemini, ...[bot]).
+AI_IDENT_RE='^(claude( code)?|codex|chatgpt|openai|copilot|github copilot|gemini|antigravity|cursor|devin)$|noreply@anthropic\.com|@openai\.com|\[bot\]'
+# check_identity — in lỗi và trả về 1 nếu git chưa có user.name/user.email hoặc danh tính trông như AI.
+# Tác giả commit: GIT_USER_NAME/GIT_USER_EMAIL (.autowf.env hoặc env) nếu có, không thì git config user.name/email.
+commit_name()  { [ -n "$GIT_USER_NAME" ]  && echo "$GIT_USER_NAME"  || git config --get user.name  || true; }
+commit_email() { [ -n "$GIT_USER_EMAIL" ] && echo "$GIT_USER_EMAIL" || git config --get user.email || true; }
+check_identity() {
+  local name email
+  name=$(commit_name); email=$(commit_email)
+  if [ -z "$name" ] || [ -z "$email" ]; then
+    echo "❌ Chưa có tác giả commit — commit phải mang tên người viết. Đặt GIT_USER_NAME/GIT_USER_EMAIL trong .autowf.env, hoặc:"
+    echo "   git config --global user.name \"Tên bạn\" && git config --global user.email \"email@cua.ban\""
+    return 1
+  fi
+  if printf '%s\n%s\n' "$name" "$email" | grep -qiE "$AI_IDENT_RE"; then
+    echo "❌ Tác giả commit '$name <$email>' trông như AI/bot — commit chỉ được mang tên người viết."
+    echo "   Đặt lại GIT_USER_NAME/GIT_USER_EMAIL trong .autowf.env, hoặc git config user.name/user.email"
+    return 1
+  fi
+  echo "✅ Tác giả commit: $name <$email>"
+}
+# pin_identity — cố định tác giả/committer cho cả lần chạy, để agent có đổi git config cũng không đổi được tên
+# trên commit của script.
+pin_identity() {
+  GIT_AUTHOR_NAME=$(commit_name); GIT_AUTHOR_EMAIL=$(commit_email)
+  GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"; GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+  export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+}
+# strip_coauthors — bỏ khỏi message của HEAD mọi trailer Co-authored-by và dòng "Generated with <công cụ AI>"
+# (do hook, template hay công cụ ngoài chèn vào). Viết lại HEAD bằng commit-tree: không chạy hook, giữ nguyên
+# tree, parent, tác giả và ngày.
+strip_coauthors() {
+  local msg clean p new parents=()
+  msg=$(git log -1 --format=%B | git stripspace)
+  clean=$(printf '%s\n' "$msg" \
+    | { grep -viE '^[[:space:]]*co-authored-by:|generated (with|by) .*(claude|codex|chatgpt|openai|copilot|gemini|cursor)' || true; } \
+    | git stripspace)
+  [ "$clean" != "$msg" ] || return 0
+  [ -n "$clean" ] || clean="(no message)"
+  for p in $(git log -1 --format=%P); do parents+=(-p "$p"); done
+  new=$(printf '%s\n' "$clean" | GIT_AUTHOR_NAME="$(git log -1 --format=%an)" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae)" \
+    GIT_AUTHOR_DATE="$(git log -1 --format=%aI)" git commit-tree "HEAD^{tree}" "${parents[@]}")
+  git update-ref -m "auto.sh: bỏ trailer co-author" HEAD "$new"
+}
+# git commit rồi bỏ co-author khỏi commit vừa tạo
+git_commit() { git commit "$@" || return; strip_coauthors; }
+
 # git add + commit; hook (vd. pre-commit tự format) sửa file làm commit fail thì add lại và thử thêm 1 lần.
 # Output của git/hook ghi vào <file log>.
 commit_task() {  # <message> <file log>
   git add -A
-  git commit -qm "$1" --allow-empty > "$2" 2>&1 && return 0
+  git_commit -qm "$1" --allow-empty > "$2" 2>&1 && return 0
   echo "[auto.sh] commit bị từ chối — add lại file hook đã sửa và thử lại" >> "$2"
   git add -A
-  git commit -qm "$1" --allow-empty >> "$2" 2>&1
+  git_commit -qm "$1" --allow-empty >> "$2" 2>&1
 }
 
 # In bảng ✅/❌; trả về 1 nếu có mục ❌ (quy tắc cần thêm để ở PREFLIGHT_REPORT)
@@ -928,9 +1063,11 @@ fi
 # ---- --check ----
 if [ "$CHECK_ONLY" -eq 1 ]; then
   OK=1
-  for c in claude "$CODER" ${FALLBACK_CODER:+"$FALLBACK_CODER"}; do
+  echo "🧩 Profile $PROFILE — plan: $(role_desc "$PLANNER" "$PLAN_MODEL"), code: $(role_desc "$CODER" "$CODER_MODEL"), review: $(role_desc "$REVIEWER" "$REVIEW_MODEL")"
+  for c in $(printf '%s\n' "$PLANNER" "$CODER" "$REVIEWER" ${FALLBACK_CODER:+"$FALLBACK_CODER"} | awk '!seen[$0]++'); do
     if command -v "$c" >/dev/null; then echo "✅ Đã cài $c"; else echo "❌ Chưa cài $c"; OK=0; fi
   done
+  check_identity || OK=0
   if load_plan; then echo "✅ PLAN.md hợp lệ: $TOTAL task, TEST_CMD: $TEST_CMD"
   else echo "❌ PLAN.md: $PLAN_ERR"; OK=0; fi
   if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -976,6 +1113,8 @@ if [ -n "$ADOPT" ]; then
   case "$ADOPT" in *[!0-9]*) ADOPT=0 ;; esac
   if [ "$ADOPT" -lt 1 ] || [ "$ADOPT" -gt "$TOTAL" ]; then echo "❌ --adopt cần số task từ 1 đến $TOTAL"; exit 1; fi
   git rev-parse -q --verify HEAD >/dev/null || { echo "❌ Repo chưa có commit nào"; exit 1; }
+  check_identity || exit 1
+  pin_identity
   load_done_subjects
   MSG=$(task_msg "$ADOPT")
   if task_done "$ADOPT"; then echo "ℹ️  Task $ADOPT đã có commit kể từ khi danh sách task trong PLAN.md đổi lần cuối — không cần làm gì"; exit 0; fi
@@ -1001,26 +1140,41 @@ if [ -n "$ADOPT" ]; then
       tail -n 15 "$LOG_DIR/adopt-task$ADOPT-commit.log" | sed 's/^/   /'; exit 1; }
     echo "✅ Đã commit: $(git log -1 --format='%h %s')"
   else
-    git commit -q --amend -m "$MSG"
+    git_commit -q --amend -m "$MSG"
     echo "✅ Đổi tên HEAD '$OLD' → $(git log -1 --format='%h %s')"
   fi
   exit 0
 fi
 
-need claude "Cài: curl -fsSL https://claude.ai/install.sh | bash"
-[ "$PLAN_ONLY" -eq 1 ] || need "$CODER" "Cài coding agent '$CODER' trước (Codex: npm i -g @openai/codex && codex login)"
+install_hint() {
+  case "$1" in
+    claude) echo "Cài: curl -fsSL https://claude.ai/install.sh | bash, rồi chạy claude để đăng nhập" ;;
+    codex)  echo "Cài: npm i -g @openai/codex && codex login" ;;
+    gemini) echo "Cài: npm i -g @google/gemini-cli, rồi chạy gemini để đăng nhập" ;;
+    agy)    echo "Cài Antigravity CLI (agy) và đăng nhập" ;;
+    *)      echo "Cài '$1' hoặc đổi profile (auto.sh --profiles)" ;;
+  esac
+}
+echo "🧩 Profile $PROFILE — plan: $(role_desc "$PLANNER" "$PLAN_MODEL"), code: $(role_desc "$CODER" "$CODER_MODEL"), review: $(role_desc "$REVIEWER" "$REVIEW_MODEL")"
+[ -f PLAN.md ] || need "$PLANNER" "$(install_hint "$PLANNER")"
+if [ "$PLAN_ONLY" -eq 0 ]; then
+  need "$CODER" "$(install_hint "$CODER")"
+  need "$REVIEWER" "$(install_hint "$REVIEWER")"
+fi
 if [ -n "$FALLBACK_CODER" ] && ! command -v "$FALLBACK_CODER" >/dev/null; then
   echo "⚠️  FALLBACK_CODER='$FALLBACK_CODER' chưa cài — sẽ không có agent dự phòng"
   FALLBACK_CODER=""
 fi
 if [ ! -f PLAN.md ] && [ -z "$DESC" ]; then usage; exit 1; fi
+check_identity || exit 1
+pin_identity
 
 # ---- Git: không init lại repo có sẵn, không tự commit thay đổi của người dùng ----
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   git init -q
-  git add -A && git commit -qm "Before auto.sh" --allow-empty
+  git add -A && git_commit -qm "Before auto.sh" --allow-empty
 fi
-git rev-parse -q --verify HEAD >/dev/null || git commit -qm "Initial commit (auto.sh)" --allow-empty
+git rev-parse -q --verify HEAD >/dev/null || git_commit -qm "Initial commit (auto.sh)" --allow-empty
 if [ -n "$(git status --porcelain -- . ":(exclude)$LOG_DIR")" ]; then
   echo "⛔ Repo còn thay đổi chưa commit — auto.sh không tự commit hộ. Hãy commit hoặc stash rồi chạy lại:"
   git status --short -- . ":(exclude)$LOG_DIR"
@@ -1051,7 +1205,7 @@ done
 git rm -q --cached --ignore-unmatch REVIEW.md "$SUMMARY_FILE" >/dev/null
 if [ -n "$(git status --porcelain)" ]; then
   # Commit dọn dẹp chỉ đụng .gitignore: bỏ qua hook để lỗi hook được báo rõ ở bước kiểm tra hook bên dưới
-  git add -A && git commit -qm "auto.sh: ignore $LOG_DIR/, REVIEW.md and $SUMMARY_FILE" --no-verify
+  git add -A && git_commit -qm "auto.sh: ignore $LOG_DIR/, REVIEW.md and $SUMMARY_FILE" --no-verify
 fi
 
 # ---- Tóm tắt cuối mỗi lần chạy ----
@@ -1089,8 +1243,8 @@ write_summary() {
     echo
     echo "- Bắt đầu: $(fmt_time "$RUN_START"), tổng thời gian: $(fmt_dur $(($(date +%s) - RUN_START)))"
     echo "- Branch: $BRANCH"
-    echo "- Coding agent: $CODER${FALLBACK_NOTE:+ — $FALLBACK_NOTE}; review: $REVIEW_MODEL"
-    echo "- Số lần chờ hạn mức (Claude/agent): $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
+    echo "- Profile $PROFILE — plan: $(role_desc "$PLANNER" "$PLAN_MODEL"); code: $(role_desc "$CODER" "$CODER_MODEL")${FALLBACK_NOTE:+ — $FALLBACK_NOTE}; review: $(role_desc "$REVIEWER" "$REVIEW_MODEL")"
+    echo "- Số lần chờ hạn mức (agent): $WAIT_COUNT (tổng $(fmt_dur "$WAITED_SECS"))"
     echo "- Kết thúc: $STOP_REASON"
     if [ "$rc" -ne 0 ]; then
       echo
@@ -1141,25 +1295,59 @@ stop() {  # stop <exit code> <lý do> [chi tiết nhiều dòng]
   exit "$1"
 }
 
-# ---- Claude: tự chờ khi chạm giới hạn sử dụng ----
+# ---- Planner / reviewer: gọi agent theo vai trò, tự chờ khi chạm giới hạn sử dụng ----
 is_usage_limit() {  # <file output> <exit code>
   # Thông báo hạn mức chỉ 1–2 dòng; output dài hơn là câu trả lời thật (dù có nhắc tới "limit")
   [ "$(grep -c . "$1" 2>/dev/null || true)" -le 3 ] || return 1
   grep -qiE "$LIMIT_RE" "$1"
 }
 
-# claude_call <file stdin> <file output> <tham số cho claude...>
+# run_role <agent> <model> <plan|review> <prompt> <file input> <file output>
+# plan: agent được ghi file (tạo PLAN.md); <file output> là log. review: chỉ đọc; <file input> là tài liệu review,
+# <file output> chỉ chứa câu trả lời, log/stderr của agent (trừ claude) ghi vào <file output>.log.
+run_role() {
+  local agent="$1" model="$2" mode="$3" prompt="$4" in="$5" out="$6"
+  case "$agent:$mode" in
+    claude:plan)
+      claude -p ${model:+--model "$model"} --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" "$prompt" \
+        < /dev/null > "$out" 2>&1 ;;
+    claude:review)
+      claude -p ${model:+--model "$model"} "$prompt" < "$in" > "$out" 2>&1 ;;
+    codex:plan)
+      codex_exec "$prompt" "$model" workspace-write < /dev/null > "$out" 2>&1 ;;
+    codex:review)  # tài liệu + yêu cầu qua stdin (diff có thể vượt giới hạn độ dài một tham số)
+      rm -f "$out"
+      { cat "$in"; printf '\n\n=== YOUR TASK ===\n%s\n' "$prompt"; } \
+        | codex_exec - "$model" read-only --output-last-message "$out" > "$out.log" 2>&1 ;;
+    gemini:plan)
+      gemini ${model:+-m "$model"} -p "$prompt" --yolo < /dev/null > "$out" 2>&1 ;;
+    gemini:review)
+      gemini ${model:+-m "$model"} -p "$prompt" < "$in" > "$out" 2> "$out.log" ;;
+    *:plan)
+      "$agent" -p "$prompt" < /dev/null > "$out" 2>&1 ;;
+    *:review)  # agy...: tài liệu review để trong file, agent tự đọc
+      "$agent" -p "The review material (PLAN.md excerpt, test results, git diff) is in the file $in. Read all of it first. Do not modify any file.
+$prompt" < /dev/null > "$out" 2> "$out.log" ;;
+  esac
+}
+
+# role_call <agent> <model> <plan|review> <prompt> <file input> <file output>
 # Chạm giới hạn sử dụng thì ngủ tới giờ reset rồi thử lại; không tính là một lần FAIL của task.
-claude_call() {
-  local in="$1" out="$2" rc now reset_at wait_s msg
-  shift 2
+role_call() {
+  local rc log now reset_at wait_s msg
   while true; do
     rc=0
-    claude "$@" < "$in" > "$out" 2>&1 || rc=$?
-    is_usage_limit "$out" "$rc" || return "$rc"
+    run_role "$@" || rc=$?
+    if [ "$1" = claude ]; then
+      is_usage_limit "$6" "$rc" || return "$rc"
+      log="$6"
+    else
+      log="$6"; [ ! -f "$6.log" ] || log="$6.log"
+      [ "$rc" -ne 0 ] && tail -n 30 "$6" "$6.log" 2>/dev/null | grep -qiE "$AGENT_QUOTA_RE" || return "$rc"
+    fi
 
     now=$(date +%s)
-    if reset_at=$(parse_reset_time "$out" "$now"); then
+    if reset_at=$(parse_reset_time "$log" "$now"); then
       wait_s=$((reset_at - now + 120)); msg="reset lúc $(fmt_time "$reset_at") + 2 phút"
     else
       wait_s=1800; msg="không đọc được giờ reset, chờ 30 phút"
@@ -1168,14 +1356,22 @@ claude_call() {
       msg="$msg — TEST: chỉ chờ ${AUTOWF_TEST_WAIT_SECS}s"; wait_s="$AUTOWF_TEST_WAIT_SECS"
     fi
     if [ $((WAITED_SECS + wait_s)) -gt $((MAX_WAIT_HOURS * 3600)) ]; then
-      stop 3 "Claude chạm giới hạn sử dụng; chờ thêm sẽ vượt MAX_WAIT_HOURS=${MAX_WAIT_HOURS}h ($msg)"
+      stop 3 "$1 chạm giới hạn sử dụng; chờ thêm sẽ vượt MAX_WAIT_HOURS=${MAX_WAIT_HOURS}h ($msg)"
     fi
     WAIT_COUNT=$((WAIT_COUNT + 1)); WAITED_SECS=$((WAITED_SECS + wait_s))
-    echo "⏳ Claude chạm giới hạn sử dụng ($msg). Sẽ chạy lại lúc $(fmt_time $((now + wait_s)))."
-    notify "Claude hết hạn mức, chạy lại lúc $(fmt_time $((now + wait_s)))"
+    echo "⏳ $1 chạm giới hạn sử dụng ($msg). Sẽ chạy lại lúc $(fmt_time $((now + wait_s)))."
+    notify "$1 hết hạn mức, chạy lại lúc $(fmt_time $((now + wait_s)))"
     sleep "$wait_s"
-    echo "▶️  Hết giờ chờ — gọi lại Claude"
+    echo "▶️  Hết giờ chờ — gọi lại $1"
   done
+}
+
+# Reviewer chỉ được đọc: mọi thay đổi trên cây làm việc sau lúc stage (git add -A trước review) là của nó → bỏ
+undo_reviewer_edits() {  # <file log>
+  [ -n "$(git status --porcelain | grep -v '^[MADRC] ' || true)" ] || return 0
+  { echo "[auto.sh] reviewer đã sửa cây làm việc — bỏ thay đổi:"; git status --short; } >> "$1"
+  git checkout -q -- . && git clean -qfd
+  echo "⚠️  Reviewer ($REVIEWER) sửa file trong lúc review — đã bỏ (xem $1)"
 }
 
 # Kết luận review: các dòng chỉ gồm đúng một từ PASS/FAIL (bỏ qua *, #, `, dấu chấm).
@@ -1206,8 +1402,9 @@ test_signature() {
 
 # ---- Bước 1: Claude viết plan ----
 if [ ! -f PLAN.md ]; then
-  echo "🧠 Claude ($PLAN_MODEL) đang viết PLAN.md..."
-  claude_call /dev/null "$LOG_DIR/plan.log" -p "Write a PLAN.md file for the following project: $DESC
+  echo "🧠 $PLANNER${PLAN_MODEL:+ ($PLAN_MODEL)} đang viết PLAN.md (profile $PROFILE)..."
+  role_call "$PLANNER" "$PLAN_MODEL" plan "Create the file PLAN.md in the current directory (the repository root) for the following project: $DESC
+Only create PLAN.md: do not create any other file, do not write code and do not run git commands.
 
 MANDATORY format:
 - Write the whole plan in English.
@@ -1218,10 +1415,16 @@ MANDATORY format:
 - Keep tasks small (few files, one concern): the coding agent's token cost grows with every file it reads and every step it takes.
 - Make TEST_CMD print compact output (e.g. pytest -q, vitest --reporter=dot, go test without -v): the agent reads that output on every run.
 - Task 1 sets up the project skeleton and test configuration so TEST_CMD runs.
-- Write it so another coding agent can follow it without asking questions." \
-    --model "$PLAN_MODEL" --permission-mode acceptEdits --allowedTools "Read,Write,Glob,Grep" || true
-  [ -f PLAN.md ] || stop 1 "Claude không tạo được PLAN.md, xem $LOG_DIR/plan.log" "$(tail -n 5 "$LOG_DIR/plan.log" 2>/dev/null || true)"
-  git add -A && git commit -qm "PLAN.md"
+- Write it so another coding agent can follow it without asking questions." /dev/null "$LOG_DIR/plan.log" || true
+  [ -f PLAN.md ] || stop 1 "$PLANNER không tạo được PLAN.md, xem $LOG_DIR/plan.log" "$(tail -n 5 "$LOG_DIR/plan.log" 2>/dev/null || true)"
+  # Cây sạch trước bước plan: file khác ngoài PLAN.md là do planner tạo thêm → bỏ, chỉ commit PLAN.md
+  EXTRA=$(git status --porcelain -- . ':(exclude)PLAN.md')
+  if [ -n "$EXTRA" ]; then
+    echo "⚠️  $PLANNER tạo/sửa thêm file ngoài PLAN.md — đã bỏ:"; printf '%s\n' "$EXTRA" | sed 's/^/   /'
+    git checkout -q -- . ':(exclude)PLAN.md' 2>/dev/null || true
+    git clean -qfd -e PLAN.md
+  fi
+  git add PLAN.md && git_commit -qm "PLAN.md"
 fi
 
 load_plan || stop 1 "PLAN.md không hợp lệ: $PLAN_ERR"
@@ -1393,7 +1596,7 @@ Log: $LOG_DIR/task$N-try$TRY-test.log (lần trước: $LOG_DIR/task$N-try$((TRY
       echo; echo "=== GIT DIFF FOR TASK $N ==="; [ -z "$DIFF_NOTE" ] || echo "$DIFF_NOTE"; echo "$DIFF"
     } > "$REVIEW_IN"
 
-    echo "🔍 Claude ($REVIEW_MODEL) đang review..."
+    echo "🔍 $REVIEWER${REVIEW_MODEL:+ ($REVIEW_MODEL)} đang review..."
     REVIEW_PROMPT="You are a strict code reviewer. Review Task $N against its acceptance criteria in the PLAN.md excerpt above, using the test results and the diff. Check for bugs, security issues, edge cases and deviations from the plan.
 PLAN.md is fixed and approved: never ask the coder to edit PLAN.md; judge the code against it. If the diff is marked TRUNCATED, read the files listed as not shown from the working tree before judging, and never FAIL only because a file is missing from the truncated diff.
 If a PREVIOUS REVIEW section is present, first check every item in it: FAIL if any is still not fixed. Then write one line 'PROGRESS: <fixed>/<total>' = how many of its items are now fixed. For a problem it did not raise, FAIL only if it is a real bug, a security issue or a failing test; anything else is a nit.
@@ -1401,18 +1604,20 @@ If passing would need a decision PLAN.md does not make (behaviour, scope or requ
 Answer BRIEFLY, in English. The FIRST line must be exactly one word: PASS or FAIL — and write that word on no other line.
 If FAIL: at most 10 checklist items, ONE line each, formatted '- file:location — problem — fix' (or '- plan-gap: ...').
 If PASS: you may add up to 5 non-blocking suggestions, ONE line each, formatted '- nit: file:location — suggestion'. Do not paste long code."
-    REVIEW_ARGS=(-p --model "$REVIEW_MODEL" "$REVIEW_PROMPT")
-    claude_call "$REVIEW_IN" "$REVIEW_OUT" "${REVIEW_ARGS[@]}" \
-      || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
+    REVIEW_ARGS=("$REVIEWER" "$REVIEW_MODEL" review "$REVIEW_PROMPT" "$REVIEW_IN" "$REVIEW_OUT")
+    role_call "${REVIEW_ARGS[@]}" \
+      || { T_END[N]=$(date +%s); stop 4 "Không gọi được $REVIEWER để review Task $N, xem $REVIEW_OUT" "$(cat "$REVIEW_OUT" "$REVIEW_OUT.log" 2>/dev/null | head -n 5 || true)"; }
+    undo_reviewer_edits "$REVIEW_OUT.log"
 
-    VERDICT=$(cat "$REVIEW_OUT")
+    VERDICT=$(cat "$REVIEW_OUT" 2>/dev/null || true)
     FIRST=$(parse_verdict "$VERDICT")
     if [ "$FIRST" = NONE ]; then
       echo "⚠️  Review Task $N không có dòng PASS/FAIL riêng — gọi review lại một lần"
-      mv "$REVIEW_OUT" "$REVIEW_OUT.no-verdict"
-      claude_call "$REVIEW_IN" "$REVIEW_OUT" "${REVIEW_ARGS[@]}" \
-        || { T_END[N]=$(date +%s); stop 4 "Không gọi được Claude để review Task $N, xem $REVIEW_OUT" "$(head -n 5 "$REVIEW_OUT" 2>/dev/null || true)"; }
-      VERDICT=$(cat "$REVIEW_OUT")
+      mv "$REVIEW_OUT" "$REVIEW_OUT.no-verdict" 2>/dev/null || true
+      role_call "${REVIEW_ARGS[@]}" \
+        || { T_END[N]=$(date +%s); stop 4 "Không gọi được $REVIEWER để review Task $N, xem $REVIEW_OUT" "$(cat "$REVIEW_OUT" "$REVIEW_OUT.log" 2>/dev/null | head -n 5 || true)"; }
+      undo_reviewer_edits "$REVIEW_OUT.log"
+      VERDICT=$(cat "$REVIEW_OUT" 2>/dev/null || true)
       FIRST=$(parse_verdict "$VERDICT")
       if [ "$FIRST" = NONE ]; then echo "⚠️  Review lại vẫn không có PASS/FAIL — tính là FAIL"; FIRST=FAIL; fi
     fi

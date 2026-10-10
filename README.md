@@ -1,12 +1,20 @@
-# autowf — Opus lên plan, Codex viết code, Sonnet review
+# autowf — một agent lên plan, một agent viết code, một agent review
 
 **autowf** là một skill cho Claude Code kèm theo script `auto.sh`. Nó tự động làm một dự án phần mềm theo từng task:
 
-1. **Claude Opus 5.5** viết `PLAN.md`: chia dự án thành các task nhỏ, mỗi task có tiêu chí nghiệm thu kiểm chứng được bằng test.
-2. **Codex CLI** viết code cho từng task.
+1. **Planner** (mặc định Claude Opus 5.5) viết `PLAN.md`: chia dự án thành các task nhỏ, mỗi task có tiêu chí nghiệm thu kiểm chứng được bằng test.
+2. **Coder** (mặc định Codex CLI) viết code cho từng task.
 3. Script **tự chạy test**, không tin lời báo cáo của agent.
-4. **Claude Sonnet 5.5** review diff và kết quả test, trả về PASS hoặc FAIL. Khi FAIL, Codex sửa theo `REVIEW.md` rồi test và review lại.
+4. **Reviewer** (mặc định Claude Sonnet 5.5) review diff và kết quả test, trả về PASS hoặc FAIL. Khi FAIL, coder sửa theo `REVIEW.md` rồi test và review lại.
 5. Khi PASS, script commit `Task N: <tiêu đề>` và chuyển sang task tiếp theo.
+
+Agent và model của từng vai trò được chọn qua **profile**:
+
+| Profile | Plan | Code | Review | Khi nào dùng |
+| :--- | :--- | :--- | :--- | :--- |
+| `premium` (mặc định) | Claude Opus 5.5 | Codex | Claude Sonnet 5.5 | Có gói Claude trả phí, cần chất lượng cao nhất |
+| `free` | Codex | Antigravity (`agy`, Gemini) | Codex (`luna`) | Không trả phí Claude, dùng hạn mức miễn phí |
+| tự tạo | tuỳ ý | tuỳ ý | tuỳ ý | Trộn `claude` / `codex` / `gemini` / `agy` theo ý bạn |
 
 Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không bị đụng tới cho đến khi bạn merge.
 
@@ -24,6 +32,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 
 **An toàn**
 - **Bảo vệ lịch sử git:** agent tự commit thì thay đổi được đưa về lại cây làm việc. Agent đổi branch, viết lại lịch sử hoặc stash thì pipeline dừng.
+- **Commit chỉ mang tên người viết:** mọi commit dùng tác giả trong `GIT_USER_NAME`/`GIT_USER_EMAIL` (nếu đặt) hoặc `git config user.name/user.email`, không có `Co-Authored-By` của Claude, ChatGPT/Codex, Copilot hay công cụ nào khác. Script dừng nếu chưa đặt tác giả hoặc tác giả trông như AI/bot, cố định tác giả cho cả lần chạy (agent đổi `git config` cũng không ảnh hưởng), và tự bỏ trailer `Co-authored-by` / dòng "Generated with ..." mà hook hay công cụ ngoài chèn vào.
 - **Giữ nguyên plan đã duyệt:** agent sửa `PLAN.md` thì file bị khôi phục về bản đã duyệt.
 - **Preflight:** trước khi chạy, script kiểm tra agent đã đăng nhập, ghi được file, và git hook (pre-commit, husky…) cho commit qua.
 - **Cầu dao:** pipeline dừng khi agent không sửa file nào hoặc liên tục chạy lệnh bị từ chối. Script phân loại lỗi (AUTH, PERMISSION, QUOTA, TIMEOUT, CRASH…) và in cách xử lý.
@@ -36,8 +45,9 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 - **Nhật ký:** tiến độ ghi vào `.auto-logs/run.log`, tóm tắt vào `.auto-logs/summary.md`. Góp ý không chặn của reviewer được gom vào `.auto-logs/nits.md`, còn tóm tắt từng task được nối vào `PROGRESS.md`.
 
 **Linh hoạt**
-- **Đổi coding agent:** `CODER=codex` (mặc định), `agy` hoặc `gemini`. Có thể đặt agent dự phòng `FALLBACK_CODER` khi agent chính lỗi đăng nhập.
-- **Đổi model:** model viết plan và model review chỉnh được qua `PLAN_MODEL` và `REVIEW_MODEL`.
+- **Profile:** `PROFILE=premium` (mặc định) hoặc `free`, hoặc profile riêng trong `.autowf/profiles/<tên>.env` (theo repo) hay `~/.config/autowf/profiles/<tên>.env` (mọi repo). `auto.sh --profiles` liệt kê các profile.
+- **Chọn agent cho từng vai trò:** `PLANNER`, `CODER`, `REVIEWER` nhận `claude`, `codex`, `gemini` hoặc `agy`; model qua `PLAN_MODEL`, `CODER_MODEL`, `REVIEW_MODEL`. Đặt riêng biến nào thì biến đó thắng giá trị của profile. Reviewer chỉ được đọc: nếu nó sửa file thì thay đổi bị bỏ. Có thể đặt agent dự phòng `FALLBACK_CODER` khi coder lỗi đăng nhập.
+- **Tác giả commit:** `GIT_USER_NAME` / `GIT_USER_EMAIL` đặt tác giả cho mọi commit; để trống thì dùng `git config`.
 
 ---
 
@@ -46,6 +56,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 ### 1. Yêu cầu
 
 - `git` và `bash`, trên Linux hoặc macOS.
+- Các agent mà profile của bạn dùng, đã đăng nhập. Profile `premium` cần `claude` + `codex`; profile `free` cần `codex` + `agy`.
 - **Claude Code CLI** (`claude`), đã đăng nhập:
   ```bash
   curl -fsSL https://claude.ai/install.sh | bash   # hoặc: npm i -g @anthropic-ai/claude-code
@@ -87,16 +98,19 @@ Chạy trong repo dự án đích:
 ```
 
 Claude sẽ:
-1. Kiểm tra `claude`, `codex` và trạng thái git.
-2. Để Opus 5.5 viết `PLAN.md`, tóm tắt các task rồi chờ bạn duyệt hoặc sửa.
-3. Chạy pipeline ở chế độ nền và báo kết quả. Khi gặp plan-gap, Claude hỏi bạn quyết, ghi quyết định vào PLAN.md rồi chạy tiếp.
+1. Hỏi bạn chọn profile (`premium`, `free` hoặc tự chọn agent/model cho từng vai trò) và ghi vào `.autowf.env`.
+2. Kiểm tra các agent của profile và trạng thái git.
+3. Để planner viết `PLAN.md`, tóm tắt các task rồi chờ bạn duyệt hoặc sửa.
+4. Chạy pipeline ở chế độ nền và báo kết quả. Khi gặp plan-gap, Claude hỏi bạn quyết, ghi quyết định vào PLAN.md rồi chạy tiếp.
 
 Nếu repo đã có `PLAN.md`, chỉ cần gõ `/autowf` để chạy hoặc chạy tiếp.
 
 ### Chạy script trực tiếp
 
 ```bash
-./auto.sh --plan-only "mô tả dự án"   # Opus viết + commit PLAN.md rồi dừng để bạn duyệt
+./auto.sh --profiles                  # xem các profile và profile đang dùng
+./auto.sh --plan-only "mô tả dự án"   # planner viết + commit PLAN.md rồi dừng để bạn duyệt
+PROFILE=free ./auto.sh                # chạy bằng profile free
 ./auto.sh                             # chạy (hoặc chạy tiếp) theo PLAN.md
 ./auto.sh "mô tả dự án"               # viết plan rồi chạy luôn, không dừng để duyệt
 ./auto.sh --stop-after                # (từ terminal khác) dừng sau task hiện tại; huỷ: --no-stop-after
@@ -131,15 +145,18 @@ File tạo/sửa, đặc tả, acceptance criteria…
 
 ## Cấu hình
 
-Đặt biến trong file `.autowf.env` ở gốc repo đích, hoặc qua biến môi trường. Biến môi trường được ưu tiên hơn file.
+Đặt biến trong file `.autowf.env` ở gốc repo đích, hoặc qua biến môi trường. Thứ tự ưu tiên: mặc định < profile < `.autowf.env` < biến môi trường.
 
 | Biến | Mặc định | Ý nghĩa |
 | :--- | :--- | :--- |
-| `PLAN_MODEL` | `claude-opus-5-5` | Model Claude viết PLAN.md |
-| `REVIEW_MODEL` | `claude-sonnet-5-5` | Model Claude review |
-| `CODER` | `codex` | Coding agent: `codex` \| `agy` \| `gemini` |
+| `PROFILE` | `premium` | Bộ agent + model: `premium` \| `free` \| tên profile riêng |
+| `PLANNER` | theo profile | Agent viết PLAN.md: `claude` \| `codex` \| `gemini` \| `agy` |
+| `CODER` | theo profile | Coding agent: `codex` \| `claude` \| `agy` \| `gemini` |
+| `REVIEWER` | theo profile | Agent review: `claude` \| `codex` \| `gemini` \| `agy` |
+| `PLAN_MODEL` / `CODER_MODEL` / `REVIEW_MODEL` | theo profile | Model của từng vai trò; rỗng = mặc định của agent. Đổi agent của một vai trò mà không đặt model thì model của profile bị bỏ |
+| `GIT_USER_NAME` / `GIT_USER_EMAIL` | *(rỗng)* | Tác giả mọi commit; rỗng = `git config user.name/email`. Không được trông như AI/bot |
 | `FALLBACK_CODER` | *(rỗng)* | Agent dự phòng khi `CODER` lỗi đăng nhập/quyền |
-| `CODEX_MODEL` | *(rỗng)* | Model của Codex; rỗng = mặc định của Codex CLI |
+| `CODEX_MODEL` | *(rỗng)* | Model của Codex khi làm coder (biến cũ, dùng khi `CODER_MODEL` rỗng) |
 | `CODEX_SANDBOX` | `workspace-write` | Sandbox của `codex exec`: `workspace-write` \| `danger-full-access` |
 | `CODEX_NETWORK` | `1` | Cho Codex dùng mạng trong sandbox (cài package); `0` = chặn |
 | `CODEX_ARGS` | *(rỗng)* | Tham số thêm cho `codex exec` |
@@ -154,9 +171,21 @@ File tạo/sửa, đặc tả, acceptance criteria…
 Ví dụ `.autowf.env`:
 
 ```bash
+PROFILE=free
+GIT_USER_NAME="Nguyen Van A"
+GIT_USER_EMAIL=a@example.com
 MAX_TRIES=5
 FALLBACK_CODER=gemini
 REQUIRE_CMD="docker compose exec -T postgres pg_isready"
+```
+
+Ví dụ profile riêng `~/.config/autowf/profiles/mix.env`, dùng bằng `PROFILE=mix`:
+
+```bash
+PLANNER=codex
+CODER=claude
+CODER_MODEL=claude-sonnet-5-5
+REVIEWER=agy
 ```
 
 > **Codex trong container:** sandbox Linux của Codex có thể không chạy được trong Docker hoặc Codespaces. Nếu log báo lỗi sandbox, bạn có thể đặt `CODEX_ARGS="--dangerously-bypass-approvals-and-sandbox"`. Cờ này **bỏ mọi giới hạn** của Codex, nên chỉ dùng trong môi trường cô lập.
@@ -168,10 +197,10 @@ REQUIRE_CMD="docker compose exec -T postgres pg_isready"
 | Mã | Ý nghĩa |
 | :--- | :--- |
 | `0` | Xong hết các task, hoặc đã dừng theo `--stop-after` |
-| `1` | Task FAIL sau khi hết số vòng sửa; xem `REVIEW.md` và `.auto-logs/task<N>-*` |
+| `1` | Task FAIL sau khi hết số vòng sửa (xem `REVIEW.md` và `.auto-logs/task<N>-*`), hoặc chưa có tác giả commit hợp lệ |
 | `2` | Cầu dao: agent không sửa file, rời branch, viết lại lịch sử, lệnh bị từ chối liên tục… |
 | `3` | Chờ hết hạn mức quá `MAX_WAIT_HOURS` |
-| `4` | Không gọi được Claude để review |
+| `4` | Không gọi được reviewer |
 | `5` | Preflight chưa đạt (đăng nhập, quyền ghi file, git hook) |
 | `6` | Dịch vụ trong `REQUIRE_CMD` không sẵn sàng |
 | `7` | plan-gap: PLAN.md thiếu một quyết định, cần người quyết |
