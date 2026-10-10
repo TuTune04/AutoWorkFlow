@@ -11,8 +11,8 @@ tuyệt đối từ "Base directory" của skill). Script tự làm mọi thứ:
 gọi `CODER` cho từng task, tự chạy `TEST_CMD`, gọi `REVIEWER` review, sửa lại tối đa `MAX_TRIES` vòng, rồi commit
 `Task N: <tiêu đề>`.
 
-**Vai trò của bạn (phiên Claude hiện tại) chỉ là điều phối:** chạy script, giúp người dùng chọn profile, trình plan
-cho người dùng duyệt, theo dõi, và xử lý khi script dừng. Không tự viết PLAN.md hay code thay cho các agent, và
+**Vai trò của bạn (phiên Claude hiện tại) chỉ là điều phối:** chạy script, trình plan cho người dùng duyệt,
+theo dõi, và xử lý khi script dừng. Không tự viết PLAN.md hay code thay cho các agent, và
 không tự commit thay cho script (trừ khi ghi quyết định của người dùng vào PLAN.md như bước 3 và 5).
 
 **Quy tắc commit (bắt buộc):** mọi commit chỉ mang tác giả là người dùng (`GIT_USER_NAME`/`GIT_USER_EMAIL` trong
@@ -23,11 +23,20 @@ trailer đó khỏi commit của nó và dừng nếu chưa có tác giả hoặ
 
 Đối số người dùng truyền vào skill: `$ARGUMENTS`
 
-## 1. Chọn profile (trước khi setup và viết plan)
+## Nguyên tắc: hỏi ít nhất có thể
 
-Profile quyết định agent + model cho 3 vai trò. Chạy `SCRIPT --profiles` để xem profile có sẵn, profile riêng và
-profile đang dùng. Nếu repo đã có `.autowf.env` đặt `PROFILE` (hoặc người dùng đã nói rõ) thì dùng luôn; nếu
-không, **hỏi người dùng chọn** (AskUserQuestion) trước khi kiểm tra môi trường hay viết plan:
+Mặc định cứ làm, chỉ dừng lại hỏi khi thật sự cần quyết định của người dùng. Cả quy trình **chỉ có tối đa hai
+lần hỏi**: (a) xin phép cài agent còn thiếu (nếu có), (b) duyệt plan (bỏ qua nếu người dùng nói "chạy luôn",
+"không cần duyệt"...). Không hỏi thêm chi tiết dự án khi mô tả đã đủ để viết plan — planner tự chọn giả định hợp
+lý và ghi vào PLAN.md; người dùng sửa lúc duyệt plan. Không hỏi lại điều người dùng đã nói, không hỏi "tiếp tục
+nhé?" giữa các bước.
+
+## 1. Profile (không hỏi trừ khi cần)
+
+Profile quyết định agent + model cho 3 vai trò. Lấy theo thứ tự: điều người dùng nói trong yêu cầu ("chạy free",
+"Codex review"...) → `PROFILE` trong `.autowf.env` của repo đích → mặc định `premium`. Báo một dòng profile đang
+dùng rồi làm tiếp, **không hỏi**. Chỉ hỏi (AskUserQuestion) khi người dùng muốn tự chọn, hoặc khi agent của profile
+chưa cài mà profile kia đã đủ agent (hỏi gộp: cài agent thiếu hay chuyển profile).
 
 | Profile | Plan | Code | Review | Phù hợp |
 |---|---|---|---|---|
@@ -35,8 +44,7 @@ không, **hỏi người dùng chọn** (AskUserQuestion) trước khi kiểm tr
 | `free` | Codex | Antigravity (`agy`, Gemini) | Codex (`luna`) | Không trả phí Claude, dùng hạn mức miễn phí |
 | Tuỳ chỉnh | tự chọn | tự chọn | tự chọn | Trộn agent theo ý (vd. Codex plan, Claude code, agy review) |
 
-Với tuỳ chỉnh, hỏi agent (`claude` | `codex` | `gemini` | `agy`) và model (có thể để trống = mặc định của agent)
-cho từng vai trò. Ghi lựa chọn vào `.autowf.env` ở gốc repo đích (tạo nếu chưa có, giữ các dòng khác), ví dụ:
+Người dùng chọn khác mặc định thì ghi vào `.autowf.env` ở gốc repo đích (tạo nếu chưa có, giữ các dòng khác), ví dụ:
 
 ```bash
 PROFILE=free
@@ -49,35 +57,45 @@ REVIEWER=agy
 
 Muốn lưu thành profile dùng lại: file `.autowf/profiles/<tên>.env` (theo repo) hoặc
 `~/.config/autowf/profiles/<tên>.env` (mọi repo) với các biến trên, rồi `PROFILE=<tên>`.
-Hỏi thêm nếu người dùng muốn đặt tác giả commit khác `git config` (`GIT_USER_NAME`, `GIT_USER_EMAIL`).
+Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL` (chỉ đặt khi người dùng yêu cầu).
 
 ## 2. Kiểm tra môi trường
 
-Chạy ở gốc repo đích (không phải thư mục skill):
+Chạy ở gốc repo đích (không phải thư mục skill). Repo đích chưa phải git repo thì cứ để script tự `git init`.
 
 - `SCRIPT --check` — in profile đang dùng, kiểm tra các agent của profile đã cài chưa, tác giả commit, PLAN.md,
-  git và git hook. Thiếu agent thì báo người dùng cách cài, **không tự cài khi chưa được đồng ý**:
-  - Claude CLI: `curl -fsSL https://claude.ai/install.sh | bash` (hoặc `npm i -g @anthropic-ai/claude-code`), rồi đăng nhập.
-  - Codex CLI: `npm i -g @openai/codex`, rồi `codex login` (người dùng tự chạy vì cần trình duyệt; gợi ý `! codex login`).
-    Kiểm tra: `codex login status`.
-  - Gemini CLI: `npm i -g @google/gemini-cli`, rồi chạy `gemini` để đăng nhập.
-  - Antigravity CLI (`agy`): người dùng cài và đăng nhập; quyền lệnh nằm trong `~/.gemini/config/config.json`
+  git và git hook. Thiếu agent thì hỏi **một lần** xin cài tất cả agent còn thiếu (không tự cài khi chưa được
+  đồng ý), được đồng ý thì cài luôn:
+  - Claude CLI: `npm i -g @anthropic-ai/claude-code` (hoặc `curl -fsSL https://claude.ai/install.sh | bash`).
+  - Codex CLI: `npm i -g @openai/codex`.
+  - Gemini CLI: `npm i -g @google/gemini-cli`.
+  - Antigravity CLI (`agy`): người dùng tự cài; quyền lệnh nằm trong `~/.gemini/config/config.json`
     (preflight của script báo quy tắc còn thiếu).
-- `git status --porcelain` phải sạch — script từ chối chạy khi còn thay đổi chưa commit. Nếu không sạch,
+- Đăng nhập: thử trước (`codex login status`, `claude -p "Reply OK"`); chỉ khi chưa đăng nhập mới nhờ người dùng.
+  Trong Codespaces/container dùng `! codex login --device-auth` (trình duyệt không mở được localhost của
+  container). Nếu người dùng dán URL `http://127.0.0.1:1455/auth/callback?...` thì gửi nó tới tiến trình
+  `codex login` đang chờ bằng `curl '<URL>'` là xong. Trong lúc chờ đăng nhập agent của bước sau, cứ làm tiếp
+  bước không cần agent đó (vd. planner Claude viết plan trong khi người dùng đăng nhập Codex).
+- `git status --porcelain` phải sạch — script từ chối chạy khi còn thay đổi chưa commit. Chỉ khi không sạch mới
   hỏi người dùng muốn commit hay stash; không tự quyết.
 
 ## 3. Viết plan (chỉ khi chưa có PLAN.md)
 
-Cần mô tả dự án: lấy từ `$ARGUMENTS`; nếu trống thì hỏi người dùng. Chạy (timeout 10 phút):
+Mô tả dự án lấy từ `$ARGUMENTS`; chỉ hỏi khi trống. Mô tả ngắn ("game mini") thì tự bổ sung giả định hợp lý
+(stack đơn giản, không phụ thuộc ngoài, có test chạy được) vào mô tả gửi cho planner thay vì hỏi người dùng.
 
-```bash
-SCRIPT --plan-only "<mô tả dự án>"
-```
+- Người dùng muốn chạy luôn: `SCRIPT "<mô tả dự án>"` ở chế độ nền (như bước 4) — viết plan rồi code luôn.
+- Mặc định (timeout 10 phút):
 
-Script để `PLANNER` của profile viết PLAN.md, commit rồi thoát. Sau đó đọc PLAN.md và trình bày ngắn cho người
-dùng: `TEST_CMD`, danh sách `## Task N`, và những giả định đáng chú ý. Hỏi người dùng duyệt hay muốn sửa.
-Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng `TEST_CMD: ...`, heading `## Task N: <tiêu đề>`
-đánh số liên tục từ 1), rồi `git commit -am "PLAN.md: <thay đổi>"` (message chỉ một dòng, không trailer co-author).
+  ```bash
+  SCRIPT --plan-only "<mô tả dự án>"
+  ```
+
+  Script để `PLANNER` của profile viết PLAN.md, commit rồi thoát. Trình bày ngắn: `TEST_CMD`, danh sách
+  `## Task N`, giả định đáng chú ý, rồi hỏi **một câu**: chạy luôn hay sửa gì. Người dùng trả lời đồng ý (kể cả
+  "ok", "chạy đi", "xong chưa") là chạy bước 4 ngay. Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng
+  `TEST_CMD: ...`, heading `## Task N: <tiêu đề>` đánh số liên tục từ 1), `git commit -am "PLAN.md: <thay đổi>"`
+  (message chỉ một dòng, không trailer co-author), rồi chạy bước 4 luôn — không hỏi duyệt lại.
 
 Đã có PLAN.md thì bỏ qua bước này (task đã có commit "Task N" sẽ được bỏ qua — chạy tiếp được).
 

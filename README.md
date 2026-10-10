@@ -69,15 +69,29 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
   codex login status                               # kiểm tra
   ```
 
-### 2. Cài skill
+### 2. Cài skill — chọn phiên bản
 
-Skill nằm ở `.claude/skills/autowf/`, gồm `SKILL.md` và `scripts/auto.sh`.
+Có hai phiên bản, cài một trong hai:
 
-- **Chỉ dùng trong repo này:** không cần làm gì thêm. Claude Code tự nhận skill trong `.claude/skills/`.
-- **Dùng cho mọi dự án:** chép skill vào thư mục skill của người dùng.
-  ```bash
-  cp -r .claude/skills/autowf ~/.claude/skills/
-  ```
+| | v1 | v2 |
+| :--- | :--- | :--- |
+| Agent | Cố định: Claude Opus plan, Codex code, Claude Sonnet review | Chọn qua profile: `premium`, `free` hoặc tự chọn agent/model cho từng vai trò |
+| Tác giả commit | `git config` | `GIT_USER_NAME`/`GIT_USER_EMAIL` hoặc `git config`; không bao giờ có `Co-authored-by` của AI |
+| Hỏi người dùng | Duyệt plan | Tối đa hai lần: xin cài agent thiếu, duyệt plan (bỏ được) |
+| Khi nào chọn | Muốn ổn định, ít thành phần, ít lỗi hơn | Không có gói Claude trả phí, hoặc muốn trộn agent |
+| Nguồn | `versions/v1/autowf/` (bản ở commit `update readme`) | `.claude/skills/autowf/` |
+
+```bash
+./install.sh              # hỏi chọn phiên bản
+./install.sh 1            # cài v1 vào ~/.claude/skills/autowf (dùng cho mọi dự án)
+./install.sh 2            # cài v2
+./install.sh 1 --project ../du-an-cua-toi   # chỉ cài cho một repo: ../du-an-cua-toi/.claude/skills/autowf
+```
+
+Bản đang cài (nếu có) được giữ lại thành `autowf.bak-<thời gian>`. Phiên bản đang cài ghi trong file `VERSION`
+của skill. Nhờ Claude Code cài ("cài skill autowf") thì Claude sẽ hỏi bạn chọn v1 hay v2.
+
+Trong chính repo này, Claude Code dùng sẵn v2 ở `.claude/skills/`, không cần cài.
 
 ### 3. Kiểm tra
 
