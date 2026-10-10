@@ -85,6 +85,16 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 | Hỏi người dùng | Duyệt plan | Tối đa hai lần: xin cài agent thiếu, duyệt plan (bỏ được) |
 | Khi nào chọn | Muốn ổn định, ít thành phần, ít lỗi hơn | Dùng Codex/Antigravity, không có gói Claude trả phí, hoặc muốn trộn agent |
 
+Cài bằng **một lệnh**, không cần clone repo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash                  # hỏi chọn
+curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- 2 codex   # chọn sẵn
+```
+
+Script tự tải repo về thư mục tạm, cài, rồi xoá. Mọi tham số bên dưới dùng được sau `bash -s --`. Cài một bản cố
+định: `AUTOWF_REF=<tag hoặc commit>`. Đã clone repo thì chạy thẳng `./install.sh`:
+
 ```bash
 ./install.sh                          # hỏi chọn phiên bản và harness
 ./install.sh 1                        # v1 cho Claude Code → ~/.claude/skills/autowf

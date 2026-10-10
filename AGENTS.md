@@ -14,7 +14,8 @@ Repo chứa skill **autowf**: một agent lên plan, một agent code, một age
    ổn định; v2: Claude Code / Codex / Antigravity, đổi được agent, hỏi ít hơn), harness (với v2), và cài cho mọi
    dự án hay chỉ một repo (`--project <đường dẫn>`).
 2. Chạy `./install.sh <1|2> [claude] [codex] [antigravity] [--project <đường dẫn>]` ở gốc repo này. Không chép tay,
-   không cài vào chính repo này.
+   không cài vào chính repo này. Ngoài repo (chưa clone) thì dùng một lệnh:
+   `curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- <tham số như trên>`.
 3. Báo đường dẫn đã cài và lệnh kiểm tra `<đường dẫn>/scripts/auto.sh --check`.
 
 ## Commit trong repo này

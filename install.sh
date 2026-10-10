@@ -1,6 +1,10 @@
 #!/bin/bash
 # install.sh — cài skill autowf, chọn phiên bản và harness (công cụ sẽ điều phối pipeline).
 #
+# Cài bằng một lệnh, không cần clone repo (tham số giống hệt bên dưới, đặt sau "bash -s --"):
+#   curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- 2 codex
+#
 # Cách dùng:
 #   ./install.sh                        hỏi chọn (cần terminal tương tác)
 #   ./install.sh 1                      v1 cho Claude Code: Opus plan, Codex code, Sonnet review — ít thành phần, ổn định
@@ -17,7 +21,34 @@
 
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")" && pwd)
+usage() { cat <<'USAGE'
+Cài skill autowf.
+  install.sh                        hỏi chọn phiên bản và harness
+  install.sh 1                      v1 cho Claude Code (Opus plan, Codex code, Sonnet review cố định)
+  install.sh 2 claude|codex|antigravity [...]   v2 cho một hoặc nhiều harness
+  install.sh ... --project DIR      chỉ cài cho repo DIR
+Cài không cần clone:
+  curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- 2 codex
+Biến: AUTOWF_REPO (mặc định TuTune04/AutoWorkFlow), AUTOWF_REF (branch/tag, mặc định main)
+USAGE
+}
+
+# Nguồn skill: chạy từ bản clone thì dùng luôn; chạy qua "curl | bash" (không có file repo bên cạnh) thì tải
+# bản nén của repo từ GitHub về thư mục tạm.
+AUTOWF_REPO="${AUTOWF_REPO:-TuTune04/AutoWorkFlow}"
+AUTOWF_REF="${AUTOWF_REF:-main}"
+ROOT=""
+if [ -f "${BASH_SOURCE[0]:-}" ]; then ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); fi
+SRC_TMP=""
+fetch_source() {
+  command -v curl >/dev/null || { echo "❌ Cần curl để tải autowf"; exit 1; }
+  SRC_TMP=$(mktemp -d)
+  trap 'rm -rf "$SRC_TMP"' EXIT
+  echo "⬇️  Tải $AUTOWF_REPO@$AUTOWF_REF ..."
+  curl -fsSL "https://codeload.github.com/$AUTOWF_REPO/tar.gz/$AUTOWF_REF" | tar -xz -C "$SRC_TMP" \
+    || { echo "❌ Không tải được https://github.com/$AUTOWF_REPO (ref $AUTOWF_REF)"; exit 1; }
+  ROOT=$(find "$SRC_TMP" -mindepth 1 -maxdepth 1 -type d | head -n1)
+}
 VERSION=""
 HARNESSES=""
 PROJECT=""
@@ -29,19 +60,29 @@ while [ $# -gt 0 ]; do
     claude|codex|antigravity) HARNESSES+=" $1" ;;
     agy)         HARNESSES+=" antigravity" ;;
     --project)   PROJECT="$(cd "${2:?--project cần đường dẫn}" && pwd)"; shift ;;
-    -h|--help)   sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
     *)           echo "❌ Tham số không hợp lệ: $1 (xem ./install.sh --help)"; exit 1 ;;
   esac
   shift
 done
 
-ask() {  # <câu hỏi> → in câu trả lời; không có terminal thì báo cách chạy không tương tác
-  if [ ! -t 0 ]; then echo "❌ Thiếu lựa chọn. Chạy không tương tác, vd.: ./install.sh 1   hoặc   ./install.sh 2 codex" >&2; exit 1; fi
-  local a; read -r -p "$1" a; printf '%s' "$a"
+# Hỏi qua terminal: "curl | bash" chiếm stdin cho nội dung script, nên đọc từ /dev/tty
+TTY=""
+if [ -t 0 ]; then TTY=/dev/stdin; elif (: < /dev/tty) 2>/dev/null; then TTY=/dev/tty; fi
+need_tty() {
+  [ -n "$TTY" ] && return 0
+  echo "❌ Thiếu lựa chọn và không có terminal để hỏi. Ghi rõ, vd.: install.sh 1   hoặc   install.sh 2 codex" >&2
+  echo "   (qua curl: ... | bash -s -- 2 codex)" >&2
+  exit 1
+}
+ask() {  # <câu hỏi> → in câu trả lời
+  local a; need_tty
+  printf '%s' "$1" > /dev/tty 2>/dev/null || printf '%s' "$1" >&2
+  read -r a < "$TTY"; printf '%s' "$a"
 }
 
 if [ -z "$VERSION" ]; then
-  [ -t 0 ] || ask ""   # không có terminal: báo cách chạy không tương tác rồi thoát
+  need_tty
   echo "Chọn phiên bản skill autowf:"
   echo "  1) v1 — chỉ Claude Code. Claude Opus plan, Codex code, Claude Sonnet review (cố định). Ít thành phần, ít lỗi hơn."
   echo "  2) v2 — Claude Code, Codex hoặc Antigravity. Đổi được agent từng vai trò, đặt tác giả commit, hỏi ít hơn."
@@ -51,7 +92,7 @@ fi
 if [ "$VERSION" = 1 ]; then
   case "$HARNESSES" in ""|" claude") HARNESSES=" claude" ;; *) echo "❌ v1 chỉ có cho Claude Code"; exit 1 ;; esac
 elif [ -z "$HARNESSES" ]; then
-  [ -t 0 ] || ask ""
+  need_tty
   echo "Cài v2 cho harness nào (công cụ bạn dùng để gọi /autowf)? Có thể chọn nhiều, cách nhau bởi dấu cách:"
   echo "  claude       Claude Code — Claude Opus plan, Codex code, Claude Sonnet review"
   echo "  codex        Codex CLI — Codex plan, agy code, Codex review (không cần gói Claude)"
@@ -62,6 +103,8 @@ elif [ -z "$HARNESSES" ]; then
   done
   HARNESSES=${HARNESSES//agy/antigravity}
 fi
+
+if [ -z "$ROOT" ] || [ ! -d "$ROOT/core" ] || [ ! -d "$ROOT/versions/v1" ]; then fetch_source; fi
 
 # Đích cài của mỗi harness (mỗi dòng một thư mục skills)
 dest_bases() {  # <harness>
