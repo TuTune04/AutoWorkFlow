@@ -1,6 +1,6 @@
 # autowf — một agent lên plan, một agent viết code, một agent review
 
-**autowf** là một skill cho Claude Code kèm theo script `auto.sh`. Nó tự động làm một dự án phần mềm theo từng task:
+**autowf** là một skill (cho Claude Code, Codex hoặc Antigravity) kèm theo script `auto.sh`. Nó tự động làm một dự án phần mềm theo từng task:
 
 1. **Planner** (mặc định Claude Opus 5.5) viết `PLAN.md`: chia dự án thành các task nhỏ, mỗi task có tiêu chí nghiệm thu kiểm chứng được bằng test.
 2. **Coder** (mặc định Codex CLI) viết code cho từng task.
@@ -8,13 +8,19 @@
 4. **Reviewer** (mặc định Claude Sonnet 5.5) review diff và kết quả test, trả về PASS hoặc FAIL. Khi FAIL, coder sửa theo `REVIEW.md` rồi test và review lại.
 5. Khi PASS, script commit `Task N: <tiêu đề>` và chuyển sang task tiếp theo.
 
-Agent và model của từng vai trò được chọn qua **profile**:
+Mỗi harness (công cụ bạn dùng để gọi skill) có một bản skill riêng, với bộ agent và hướng dẫn hợp với nó. Tất cả dùng chung một script lõi:
 
-| Profile | Plan | Code | Review | Khi nào dùng |
-| :--- | :--- | :--- | :--- | :--- |
-| `premium` (mặc định) | Claude Opus 5.5 | Codex | Claude Sonnet 5.5 | Có gói Claude trả phí, cần chất lượng cao nhất |
-| `free` | Codex | Antigravity (`agy`, Gemini) | Codex (`luna`) | Không trả phí Claude, dùng hạn mức miễn phí |
-| tự tạo | tuỳ ý | tuỳ ý | tuỳ ý | Trộn `claude` / `codex` / `gemini` / `agy` theo ý bạn |
+| Harness | Thư mục skill | Plan | Code | Review | Khi nào dùng |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Claude Code | `.claude/skills/autowf/` | Claude Opus 5.5 | Codex | Claude Sonnet 5.5 | Có gói Claude trả phí, cần chất lượng cao nhất |
+| Codex, Antigravity | `.agents/skills/autowf/` | Codex | Antigravity (`agy`, Gemini) | Codex (`luna`) | Không trả phí Claude, dùng hạn mức miễn phí |
+
+```
+core/auto.sh                      # script lõi dùng chung (một bản duy nhất)
+.claude/skills/autowf/            # skill cho Claude Code: SKILL.md + defaults.env (bộ agent) + scripts/auto.sh → core
+.agents/skills/autowf/            # skill cho Codex và Antigravity (cả hai đều đọc .agents/skills)
+versions/v1/autowf/               # v1: bản Claude Code đầu tiên, giữ nguyên
+```
 
 Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không bị đụng tới cho đến khi bạn merge.
 
@@ -45,8 +51,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 - **Nhật ký:** tiến độ ghi vào `.auto-logs/run.log`, tóm tắt vào `.auto-logs/summary.md`. Góp ý không chặn của reviewer được gom vào `.auto-logs/nits.md`, còn tóm tắt từng task được nối vào `PROGRESS.md`.
 
 **Linh hoạt**
-- **Profile:** `PROFILE=premium` (mặc định) hoặc `free`, hoặc profile riêng trong `.autowf/profiles/<tên>.env` (theo repo) hay `~/.config/autowf/profiles/<tên>.env` (mọi repo). `auto.sh --profiles` liệt kê các profile.
-- **Chọn agent cho từng vai trò:** `PLANNER`, `CODER`, `REVIEWER` nhận `claude`, `codex`, `gemini` hoặc `agy`; model qua `PLAN_MODEL`, `CODER_MODEL`, `REVIEW_MODEL`. Đặt riêng biến nào thì biến đó thắng giá trị của profile. Reviewer chỉ được đọc: nếu nó sửa file thì thay đổi bị bỏ. Có thể đặt agent dự phòng `FALLBACK_CODER` khi coder lỗi đăng nhập.
+- **Đổi agent từng vai trò:** `PLANNER`, `CODER`, `REVIEWER` nhận `claude`, `codex`, `gemini` hoặc `agy`; model qua `PLAN_MODEL`, `CODER_MODEL`, `REVIEW_MODEL`. Đặt trong `.autowf.env` của repo dự án để ghi đè bộ agent của skill (`defaults.env`). Reviewer chỉ được đọc: nếu nó sửa file thì thay đổi bị bỏ. Có thể đặt agent dự phòng `FALLBACK_CODER` khi coder lỗi đăng nhập.
 - **Tác giả commit:** `GIT_USER_NAME` / `GIT_USER_EMAIL` đặt tác giả cho mọi commit; để trống thì dùng `git config`.
 
 ---
@@ -56,7 +61,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 ### 1. Yêu cầu
 
 - `git` và `bash`, trên Linux hoặc macOS.
-- Các agent mà profile của bạn dùng, đã đăng nhập. Profile `premium` cần `claude` + `codex`; profile `free` cần `codex` + `agy`.
+- Các agent mà bản skill của bạn dùng, đã đăng nhập: bản Claude Code cần `claude` + `codex`; bản Codex/Antigravity cần `codex` + `agy`.
 - **Claude Code CLI** (`claude`), đã đăng nhập:
   ```bash
   curl -fsSL https://claude.ai/install.sh | bash   # hoặc: npm i -g @anthropic-ai/claude-code
@@ -69,62 +74,62 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
   codex login status                               # kiểm tra
   ```
 
-### 2. Cài skill — chọn phiên bản
-
-Có hai phiên bản, cài một trong hai:
+### 2. Cài skill — chọn phiên bản và harness
 
 | | v1 | v2 |
 | :--- | :--- | :--- |
-| Agent | Cố định: Claude Opus plan, Codex code, Claude Sonnet review | Chọn qua profile: `premium`, `free` hoặc tự chọn agent/model cho từng vai trò |
+| Harness | Chỉ Claude Code | Claude Code, Codex hoặc Antigravity |
+| Agent | Cố định: Claude Opus plan, Codex code, Claude Sonnet review | Theo harness (bảng ở đầu trang); đổi được từng vai trò qua `.autowf.env` |
 | Tác giả commit | `git config` | `GIT_USER_NAME`/`GIT_USER_EMAIL` hoặc `git config`; không bao giờ có `Co-authored-by` của AI |
 | Hỏi người dùng | Duyệt plan | Tối đa hai lần: xin cài agent thiếu, duyệt plan (bỏ được) |
-| Khi nào chọn | Muốn ổn định, ít thành phần, ít lỗi hơn | Không có gói Claude trả phí, hoặc muốn trộn agent |
-| Nguồn | `versions/v1/autowf/` (bản ở commit `update readme`) | `.claude/skills/autowf/` |
+| Khi nào chọn | Muốn ổn định, ít thành phần, ít lỗi hơn | Dùng Codex/Antigravity, không có gói Claude trả phí, hoặc muốn trộn agent |
 
 ```bash
-./install.sh              # hỏi chọn phiên bản
-./install.sh 1            # cài v1 vào ~/.claude/skills/autowf (dùng cho mọi dự án)
-./install.sh 2            # cài v2
-./install.sh 1 --project ../du-an-cua-toi   # chỉ cài cho một repo: ../du-an-cua-toi/.claude/skills/autowf
+./install.sh                          # hỏi chọn phiên bản và harness
+./install.sh 1                        # v1 cho Claude Code → ~/.claude/skills/autowf
+./install.sh 2 claude                 # v2 cho Claude Code → ~/.claude/skills/autowf
+./install.sh 2 codex                  # v2 cho Codex → ~/.agents/skills/autowf
+./install.sh 2 antigravity            # v2 cho Antigravity → ~/.gemini/antigravity-cli/skills/autowf (CLI)
+                                      #                       và ~/.gemini/config/skills/autowf (IDE / 2.0)
+./install.sh 2 claude codex           # nhiều harness cùng lúc
+./install.sh 2 codex --project ../du-an-cua-toi   # chỉ cho một repo → ../du-an-cua-toi/.agents/skills/autowf
 ```
 
 Bản đang cài (nếu có) được giữ lại thành `autowf.bak-<thời gian>`. Phiên bản đang cài ghi trong file `VERSION`
-của skill. Nhờ Claude Code cài ("cài skill autowf") thì Claude sẽ hỏi bạn chọn v1 hay v2.
+của skill. Nhờ Claude Code cài ("cài skill autowf") thì Claude sẽ hỏi bạn chọn phiên bản và harness.
 
-Trong chính repo này, Claude Code dùng sẵn v2 ở `.claude/skills/`, không cần cài.
+Trong chính repo này, Claude Code, Codex và Antigravity đều dùng sẵn v2, không cần cài.
 
 ### 3. Kiểm tra
 
 Chạy trong repo dự án đích:
 
 ```bash
-~/.claude/skills/autowf/scripts/auto.sh --check       # hoặc ./auto.sh --check trong repo này
+~/.claude/skills/autowf/scripts/auto.sh --check       # bản Claude Code (bản Codex: ~/.agents/skills/autowf/...)
 ```
 
 ---
 
 ## Cách dùng
 
-### Qua Claude Code (khuyên dùng)
+### Qua skill (khuyên dùng)
 
 ```
-/autowf Ứng dụng todo dòng lệnh bằng Python, lưu JSON, test bằng pytest
+/autowf Ứng dụng todo dòng lệnh bằng Python, lưu JSON, test bằng pytest     # Claude Code, Antigravity CLI
+$autowf Ứng dụng todo dòng lệnh bằng Python, lưu JSON, test bằng pytest     # Codex
 ```
 
-Claude sẽ:
-1. Hỏi bạn chọn profile (`premium`, `free` hoặc tự chọn agent/model cho từng vai trò) và ghi vào `.autowf.env`.
-2. Kiểm tra các agent của profile và trạng thái git.
-3. Để planner viết `PLAN.md`, tóm tắt các task rồi chờ bạn duyệt hoặc sửa.
-4. Chạy pipeline ở chế độ nền và báo kết quả. Khi gặp plan-gap, Claude hỏi bạn quyết, ghi quyết định vào PLAN.md rồi chạy tiếp.
+Agent điều phối sẽ:
+1. Kiểm tra các agent cần dùng và trạng thái git; chỉ hỏi khi phải cài agent còn thiếu.
+2. Để planner viết `PLAN.md`, tóm tắt các task rồi hỏi một câu: chạy luôn hay sửa (nói "chạy luôn" từ đầu thì bỏ qua bước này).
+3. Chạy pipeline ở chế độ nền và báo kết quả. Khi gặp plan-gap, Claude hỏi bạn quyết, ghi quyết định vào PLAN.md rồi chạy tiếp.
 
 Nếu repo đã có `PLAN.md`, chỉ cần gõ `/autowf` để chạy hoặc chạy tiếp.
 
 ### Chạy script trực tiếp
 
 ```bash
-./auto.sh --profiles                  # xem các profile và profile đang dùng
 ./auto.sh --plan-only "mô tả dự án"   # planner viết + commit PLAN.md rồi dừng để bạn duyệt
-PROFILE=free ./auto.sh                # chạy bằng profile free
 ./auto.sh                             # chạy (hoặc chạy tiếp) theo PLAN.md
 ./auto.sh "mô tả dự án"               # viết plan rồi chạy luôn, không dừng để duyệt
 ./auto.sh --stop-after                # (từ terminal khác) dừng sau task hiện tại; huỷ: --no-stop-after
@@ -159,15 +164,14 @@ File tạo/sửa, đặc tả, acceptance criteria…
 
 ## Cấu hình
 
-Đặt biến trong file `.autowf.env` ở gốc repo đích, hoặc qua biến môi trường. Thứ tự ưu tiên: mặc định < profile < `.autowf.env` < biến môi trường.
+Đặt biến trong file `.autowf.env` ở gốc repo đích, hoặc qua biến môi trường. Thứ tự ưu tiên: mặc định của script < `defaults.env` của skill < `.autowf.env` < biến môi trường.
 
 | Biến | Mặc định | Ý nghĩa |
 | :--- | :--- | :--- |
-| `PROFILE` | `premium` | Bộ agent + model: `premium` \| `free` \| tên profile riêng |
-| `PLANNER` | theo profile | Agent viết PLAN.md: `claude` \| `codex` \| `gemini` \| `agy` |
-| `CODER` | theo profile | Coding agent: `codex` \| `claude` \| `agy` \| `gemini` |
-| `REVIEWER` | theo profile | Agent review: `claude` \| `codex` \| `gemini` \| `agy` |
-| `PLAN_MODEL` / `CODER_MODEL` / `REVIEW_MODEL` | theo profile | Model của từng vai trò; rỗng = mặc định của agent. Đổi agent của một vai trò mà không đặt model thì model của profile bị bỏ |
+| `PLANNER` | theo skill | Agent viết PLAN.md: `claude` \| `codex` \| `gemini` \| `agy` |
+| `CODER` | theo skill | Coding agent: `codex` \| `claude` \| `agy` \| `gemini` |
+| `REVIEWER` | theo skill | Agent review: `claude` \| `codex` \| `gemini` \| `agy` |
+| `PLAN_MODEL` / `CODER_MODEL` / `REVIEW_MODEL` | theo skill | Model của từng vai trò; rỗng = mặc định của agent. Đổi agent của một vai trò mà không đặt model thì model mặc định của vai trò đó bị bỏ |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | *(rỗng)* | Tác giả mọi commit; rỗng = `git config user.name/email`. Không được trông như AI/bot |
 | `FALLBACK_CODER` | *(rỗng)* | Agent dự phòng khi `CODER` lỗi đăng nhập/quyền |
 | `CODEX_MODEL` | *(rỗng)* | Model của Codex khi làm coder (biến cũ, dùng khi `CODER_MODEL` rỗng) |
@@ -185,21 +189,12 @@ File tạo/sửa, đặc tả, acceptance criteria…
 Ví dụ `.autowf.env`:
 
 ```bash
-PROFILE=free
+CODER=claude
 GIT_USER_NAME="Nguyen Van A"
 GIT_USER_EMAIL=a@example.com
 MAX_TRIES=5
 FALLBACK_CODER=gemini
 REQUIRE_CMD="docker compose exec -T postgres pg_isready"
-```
-
-Ví dụ profile riêng `~/.config/autowf/profiles/mix.env`, dùng bằng `PROFILE=mix`:
-
-```bash
-PLANNER=codex
-CODER=claude
-CODER_MODEL=claude-sonnet-5-5
-REVIEWER=agy
 ```
 
 > **Codex trong container:** sandbox Linux của Codex có thể không chạy được trong Docker hoặc Codespaces. Nếu log báo lỗi sandbox, bạn có thể đặt `CODEX_ARGS="--dangerously-bypass-approvals-and-sandbox"`. Cờ này **bỏ mọi giới hạn** của Codex, nên chỉ dùng trong môi trường cô lập.

@@ -1,1 +1,1 @@
-.claude/skills/autowf/scripts/auto.sh
+core/auto.sh

@@ -1,10 +1,10 @@
 ---
 name: autowf
-description: Chạy pipeline tự động viết phần mềm theo từng task — một agent viết PLAN.md, một coding agent viết code cho từng task, một agent review diff + kết quả test rồi commit "Task N". Chọn bộ agent theo profile (premium: Claude Opus plan, Codex code, Claude Sonnet review; free: Codex plan, Antigravity/Gemini code, Codex review) hoặc tự chọn agent/model cho từng vai trò. Dùng khi người dùng muốn "lên plan rồi để agent code", "chạy autowf/auto.sh", "Opus plan, Codex code, Sonnet review", "chạy bằng profile free", hoặc chạy tiếp/dừng một pipeline autowf.
+description: Chạy pipeline tự động viết phần mềm theo từng task — Claude Opus 5.5 viết PLAN.md, Codex CLI viết code cho từng task, Claude Sonnet 5.5 review diff + kết quả test rồi commit "Task N" (mọi commit chỉ mang tên người dùng). Dùng khi người dùng muốn "lên plan rồi để agent code", "chạy autowf/auto.sh", "Opus plan, Codex code, Sonnet review", hoặc chạy tiếp/dừng một pipeline autowf.
 argument-hint: "[mô tả dự án | continue | stop | check]"
 ---
 
-# autowf — agent lên plan, agent code, agent review
+# autowf (Claude Code) — Opus lên plan, Codex code, Sonnet review
 
 Toàn bộ pipeline nằm trong `scripts/auto.sh` cạnh file SKILL.md này (gọi nó là `SCRIPT`, dùng đường dẫn
 tuyệt đối từ "Base directory" của skill). Script tự làm mọi thứ: tạo branch `auto/*`, gọi `PLANNER` viết plan,
@@ -31,39 +31,28 @@ lần hỏi**: (a) xin phép cài agent còn thiếu (nếu có), (b) duyệt pl
 lý và ghi vào PLAN.md; người dùng sửa lúc duyệt plan. Không hỏi lại điều người dùng đã nói, không hỏi "tiếp tục
 nhé?" giữa các bước.
 
-## 1. Profile (không hỏi trừ khi cần)
+## 1. Bộ agent (không hỏi)
 
-Profile quyết định agent + model cho 3 vai trò. Lấy theo thứ tự: điều người dùng nói trong yêu cầu ("chạy free",
-"Codex review"...) → `PROFILE` trong `.autowf.env` của repo đích → mặc định `premium`. Báo một dòng profile đang
-dùng rồi làm tiếp, **không hỏi**. Chỉ hỏi (AskUserQuestion) khi người dùng muốn tự chọn, hoặc khi agent của profile
-chưa cài mà profile kia đã đủ agent (hỏi gộp: cài agent thiếu hay chuyển profile).
-
-| Profile | Plan | Code | Review | Phù hợp |
-|---|---|---|---|---|
-| `premium` (mặc định) | Claude Opus 5.5 | Codex | Claude Sonnet 5.5 | Có gói Claude trả phí — chất lượng cao nhất |
-| `free` | Codex | Antigravity (`agy`, Gemini) | Codex (`luna`) | Không trả phí Claude, dùng hạn mức miễn phí |
-| Tuỳ chỉnh | tự chọn | tự chọn | tự chọn | Trộn agent theo ý (vd. Codex plan, Claude code, agy review) |
-
-Người dùng chọn khác mặc định thì ghi vào `.autowf.env` ở gốc repo đích (tạo nếu chưa có, giữ các dòng khác), ví dụ:
+`defaults.env` cạnh SKILL.md này đặt bộ agent: Claude Opus 5.5 viết plan, Codex code, Claude Sonnet 5.5 review.
+Không hỏi người dùng chọn. Chỉ khi người dùng yêu cầu đổi ("Claude code luôn", "Codex review"...) mới ghi vào
+`.autowf.env` ở gốc repo đích (tạo nếu chưa có, giữ các dòng khác) — các biến ở đó thắng `defaults.env`:
 
 ```bash
-PROFILE=free
-# hoặc tuỳ chỉnh từng vai trò (thắng giá trị của profile):
-PLANNER=codex
 CODER=claude
 CODER_MODEL=claude-sonnet-5-5
-REVIEWER=agy
+REVIEWER=codex
 ```
 
-Muốn lưu thành profile dùng lại: file `.autowf/profiles/<tên>.env` (theo repo) hoặc
-`~/.config/autowf/profiles/<tên>.env` (mọi repo) với các biến trên, rồi `PROFILE=<tên>`.
+Agent: `claude` | `codex` | `gemini` | `agy`; model rỗng = mặc định của agent (đổi agent mà không đặt model thì
+model mặc định của vai trò đó bị bỏ). Người dùng không có gói Claude trả phí thì gợi ý dùng skill autowf bản
+Codex/Antigravity (`./install.sh` trong repo AutoWorkFlow) thay vì đổi từng biến.
 Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL` (chỉ đặt khi người dùng yêu cầu).
 
 ## 2. Kiểm tra môi trường
 
 Chạy ở gốc repo đích (không phải thư mục skill). Repo đích chưa phải git repo thì cứ để script tự `git init`.
 
-- `SCRIPT --check` — in profile đang dùng, kiểm tra các agent của profile đã cài chưa, tác giả commit, PLAN.md,
+- `SCRIPT --check` — in bộ agent đang dùng, kiểm tra các agent đó đã cài chưa, tác giả commit, PLAN.md,
   git và git hook. Thiếu agent thì hỏi **một lần** xin cài tất cả agent còn thiếu (không tự cài khi chưa được
   đồng ý), được đồng ý thì cài luôn:
   - Claude CLI: `npm i -g @anthropic-ai/claude-code` (hoặc `curl -fsSL https://claude.ai/install.sh | bash`).
@@ -91,7 +80,7 @@ Mô tả dự án lấy từ `$ARGUMENTS`; chỉ hỏi khi trống. Mô tả ng�
   SCRIPT --plan-only "<mô tả dự án>"
   ```
 
-  Script để `PLANNER` của profile viết PLAN.md, commit rồi thoát. Trình bày ngắn: `TEST_CMD`, danh sách
+  Script để `PLANNER` viết PLAN.md, commit rồi thoát. Trình bày ngắn: `TEST_CMD`, danh sách
   `## Task N`, giả định đáng chú ý, rồi hỏi **một câu**: chạy luôn hay sửa gì. Người dùng trả lời đồng ý (kể cả
   "ok", "chạy đi", "xong chưa") là chạy bước 4 ngay. Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng
   `TEST_CMD: ...`, heading `## Task N: <tiêu đề>` đánh số liên tục từ 1), `git commit -am "PLAN.md: <thay đổi>"`
@@ -120,7 +109,7 @@ Người dùng muốn dừng: `SCRIPT --stop-after` (dừng sau khi task hiện 
 | 0 | Xong hết (hoặc dừng theo `--stop-after`) | Tóm tắt các task, nits trong `.auto-logs/nits.md`, branch `auto/*` để người dùng merge |
 | 1 | Task FAIL sau khi hết số vòng sửa (hoặc chưa có tác giả commit hợp lệ) | Trình `REVIEW.md` + log `.auto-logs/task<N>-*`; đề xuất: làm rõ/chia nhỏ task trong PLAN.md, hoặc sửa tay rồi `SCRIPT --adopt N` |
 | 2 | Cầu dao (agent không sửa file, rời branch, lệnh bị từ chối...) | Trình thông báo lỗi và "Cách xử lý" script in ra |
-| 3 | Chờ hết hạn mức quá `MAX_WAIT_HOURS` | Báo giờ reset; chạy lại sau, hoặc gợi ý đổi profile |
+| 3 | Chờ hết hạn mức quá `MAX_WAIT_HOURS` | Báo giờ reset; chạy lại sau, hoặc gợi ý đổi agent của vai trò bị hết hạn mức |
 | 4 | Không gọi được reviewer | Kiểm tra `REVIEWER` đăng nhập / mạng / tên model (`REVIEW_MODEL`) |
 | 5 | Preflight chưa đạt (đăng nhập coder, ghi file, git hook) | Trình báo cáo; thường là cần đăng nhập coder hoặc sửa hook |
 | 6 | Dịch vụ trong `REQUIRE_CMD` chưa chạy | Nhờ người dùng bật dịch vụ |
@@ -130,12 +119,9 @@ Sau khi xử lý xong, chạy lại `SCRIPT` — task đã commit được bỏ 
 
 ## Cấu hình
 
-Đặt trong `.autowf.env` ở gốc repo đích hoặc qua biến môi trường. Thứ tự ưu tiên:
-mặc định < profile < `.autowf.env` < env. Hay dùng:
+Thứ tự ưu tiên: mặc định của script < `defaults.env` của skill < `.autowf.env` ở repo đích < biến môi trường. Hay dùng:
 
-- `PROFILE` (`premium` | `free` | tên profile riêng)
-- `PLANNER`, `CODER`, `REVIEWER` (`claude` | `codex` | `gemini` | `agy`) và `PLAN_MODEL`, `CODER_MODEL`,
-  `REVIEW_MODEL` (rỗng = mặc định của agent; đổi agent một vai trò mà không đặt model thì model của profile bị bỏ)
+- `PLANNER`, `CODER`, `REVIEWER` (`claude` | `codex` | `gemini` | `agy`) và `PLAN_MODEL`, `CODER_MODEL`, `REVIEW_MODEL`
 - `FALLBACK_CODER`, `GIT_USER_NAME`, `GIT_USER_EMAIL`
 - `CODEX_SANDBOX` (`workspace-write` | `danger-full-access`), `CODEX_NETWORK` (1 = cho Codex dùng mạng trong
   sandbox, cần để cài package), `CODEX_ARGS` (vd. `--dangerously-bypass-approvals-and-sandbox` khi sandbox Linux
