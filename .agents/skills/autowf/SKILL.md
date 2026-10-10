@@ -76,9 +76,12 @@ Mô tả dự án lấy từ yêu cầu của người dùng; chỉ hỏi khi kh
 đơn giản, không phụ thuộc ngoài, có test chạy được) vào mô tả gửi cho planner.
 
 - Người dùng muốn chạy luôn: chạy `SCRIPT "<mô tả dự án>"` theo cách chạy pipeline ở trên — viết plan rồi code luôn.
-- Mặc định: `SCRIPT --plan-only "<mô tả dự án>"` (có thể mất vài phút). Trình bày ngắn `TEST_CMD`, danh sách
-  `## Task N`, giả định đáng chú ý, rồi hỏi **một câu**: chạy luôn hay sửa gì. Đồng ý (kể cả "ok", "chạy đi") là
-  chạy bước 4 ngay. Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng `TEST_CMD: ...`, heading
+- Mặc định: `SCRIPT --plan-only "<mô tả dự án>"` (có thể mất vài phút), rồi ngay sau đó `SCRIPT --preflight` để
+  biết agy còn thiếu quyền gì (lệnh của `TEST_CMD` script tự thêm vào `AGY_ALLOWED_CMDS`; chỉ quy tắc trong
+  `~/.gemini/config/config.json` — hoặc `$AGY_CONFIG` — là cần người dùng cho phép). Trình bày ngắn `TEST_CMD`, danh
+  sách `## Task N`, giả định đáng chú ý, và (nếu có) các quy tắc quyền còn thiếu, rồi hỏi **một câu** gộp cả hai:
+  chạy luôn (kèm thêm các quy tắc đó) hay sửa gì. Đồng ý (kể cả "ok", "chạy đi") là thêm quy tắc vào
+  `globalPermissionGrants.allow` rồi chạy bước 4 ngay. Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng `TEST_CMD: ...`, heading
   `## Task N: <tiêu đề>` đánh số liên tục từ 1), `git commit -am "PLAN.md: <thay đổi>"` (message một dòng, không
   trailer co-author), rồi chạy bước 4 luôn — không hỏi duyệt lại.
 
@@ -100,7 +103,7 @@ Chạy `SCRIPT` theo mục "Chạy SCRIPT trong harness này". Khi người dùn
 | 2 | Cầu dao (agent không sửa file, rời branch, lệnh bị từ chối...) | Trình thông báo lỗi và "Cách xử lý" script in ra |
 | 3 | Chờ hết hạn mức quá `MAX_WAIT_HOURS` | Báo giờ reset; chạy lại sau |
 | 4 | Không gọi được reviewer | Kiểm tra Codex đăng nhập / mạng / tên model (`REVIEW_MODEL`) |
-| 5 | Preflight chưa đạt (đăng nhập agy, quyền lệnh, ghi file, git hook) | Trình báo cáo và quy tắc cần thêm vào `~/.gemini/config/config.json` |
+| 5 | Preflight chưa đạt (đăng nhập agy, quyền lệnh, ghi file, git hook) | Trình báo cáo và quy tắc cần thêm vào `~/.gemini/config/config.json`; được đồng ý thì thêm rồi chạy lại luôn |
 | 6 | Dịch vụ trong `REQUIRE_CMD` chưa chạy | Nhờ người dùng bật dịch vụ |
 | 7 | plan-gap: PLAN.md thiếu một quyết định | Trình các lựa chọn reviewer nêu, **hỏi người dùng quyết**, ghi vào đúng phần Task đó trong PLAN.md (không đổi heading), commit, rồi chạy lại bước 4 |
 

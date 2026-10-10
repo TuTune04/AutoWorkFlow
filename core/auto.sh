@@ -291,6 +291,14 @@ load_plan() {
   [ "$TOTAL" -gt 0 ] || { PLAN_ERR="không có heading '## Task N'"; return 1; }
   expect=$(seq 1 "$TOTAL" | awk '{ printf "%s ", $1 }')
   [ "$nums" = "$expect" ] || { PLAN_ERR="heading '## Task N' không liên tục từ 1 (thấy: $nums)"; return 1; }
+  # agy chỉ được chạy lệnh trong AGY_ALLOWED_CMDS, mà lệnh test của plan thì luôn cần → tự thêm (người dùng chỉ còn
+  # phải thêm quy tắc tương ứng vào config của agy; preflight vẫn kiểm tra quy tắc đó)
+  local exe
+  exe=$(first_exe "$TEST_CMD")
+  if [ -n "$exe" ] && ! grep -qxF "$exe" <<< "$(allowed_cmds)"; then
+    AGY_RULES=${AGY_RULES/"only use $AGY_ALLOWED_CMDS;"/"only use $AGY_ALLOWED_CMDS, $exe;"}
+    AGY_ALLOWED_CMDS+=", $exe"
+  fi
 }
 
 # In phần tổng quan của PLAN.md (trước '## Task 1') và đúng phần của Task N.
@@ -1113,8 +1121,8 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   if load_plan; then echo "✅ PLAN.md hợp lệ: $TOTAL task, TEST_CMD: $TEST_CMD"
   else echo "❌ PLAN.md: $PLAN_ERR"; OK=0; fi
   if git rev-parse --git-dir >/dev/null 2>&1; then
-    if [ -z "$(git status --porcelain -- . ":(exclude)$LOG_DIR")" ]; then echo "✅ Git sạch (branch $(git branch --show-current))"
-    else echo "❌ Git còn thay đổi chưa commit:"; git status --short -- . ":(exclude)$LOG_DIR"; OK=0; fi
+    if [ -z "$(git status --porcelain -- . ":(exclude)$LOG_DIR" ':(exclude).autowf.env')" ]; then echo "✅ Git sạch (branch $(git branch --show-current))"
+    else echo "❌ Git còn thay đổi chưa commit:"; git status --short -- . ":(exclude)$LOG_DIR" ':(exclude).autowf.env'; OK=0; fi
   else
     echo "⚠️  Chưa phải git repo — auto.sh sẽ git init khi chạy"
   fi
@@ -1218,9 +1226,10 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
   git add -A && git_commit -qm "Before auto.sh" --allow-empty
 fi
 git rev-parse -q --verify HEAD >/dev/null || git_commit -qm "Initial commit (auto.sh)" --allow-empty
-if [ -n "$(git status --porcelain -- . ":(exclude)$LOG_DIR")" ]; then
+# .autowf.env là cấu hình của chính autowf (skill ghi vào đó khi người dùng đổi agent/model): không tính là thay đổi dở
+if [ -n "$(git status --porcelain -- . ":(exclude)$LOG_DIR" ':(exclude).autowf.env')" ]; then
   echo "⛔ Repo còn thay đổi chưa commit — auto.sh không tự commit hộ. Hãy commit hoặc stash rồi chạy lại:"
-  git status --short -- . ":(exclude)$LOG_DIR"
+  git status --short -- . ":(exclude)$LOG_DIR" ':(exclude).autowf.env'
   echo "   (Bỏ phần dở của lần chạy trước: git stash -u   hoặc   git checkout -- . && git clean -fd)"
   exit 1
 fi
@@ -1241,14 +1250,24 @@ mkdir -p "$LOG_DIR"
 # Ghi mọi thứ in ra Terminal vào run.log (tee bỏ qua Ctrl-C để kịp ghi dòng cuối)
 exec > >(trap '' INT; exec tee -a "$LOG_DIR/run.log") 2>&1
 echo "===== auto.sh bắt đầu $(date '+%Y-%m-%d %H:%M:%S') trên branch $BRANCH ====="
+# .autowf.env chưa track: cấu hình cục bộ (có thể chứa NTFY_TOPIC) → ignore. Đã track mà bị sửa: commit riêng,
+# để thay đổi cấu hình không lẫn vào commit "Task N".
+if git ls-files --error-unmatch .autowf.env >/dev/null 2>&1; then
+  if ! git diff --quiet HEAD -- .autowf.env; then
+    git add .autowf.env && git_commit -qm "autowf: update .autowf.env" --no-verify
+  fi
+  IGNORE_ENV=""
+else
+  IGNORE_ENV=".autowf.env"
+fi
 touch .gitignore
-for line in "$LOG_DIR/" "REVIEW.md" "$SUMMARY_FILE"; do
+for line in "$LOG_DIR/" "REVIEW.md" "$SUMMARY_FILE" ${IGNORE_ENV:+"$IGNORE_ENV"}; do
   grep -qxF "$line" .gitignore || echo "$line" >> .gitignore
 done
 git rm -q --cached --ignore-unmatch REVIEW.md "$SUMMARY_FILE" >/dev/null
 if [ -n "$(git status --porcelain)" ]; then
   # Commit dọn dẹp chỉ đụng .gitignore: bỏ qua hook để lỗi hook được báo rõ ở bước kiểm tra hook bên dưới
-  git add -A && git_commit -qm "auto.sh: ignore $LOG_DIR/, REVIEW.md and $SUMMARY_FILE" --no-verify
+  git add -A && git_commit -qm "auto.sh: ignore $LOG_DIR/, REVIEW.md, $SUMMARY_FILE${IGNORE_ENV:+ and $IGNORE_ENV}" --no-verify
 fi
 
 # ---- Tóm tắt cuối mỗi lần chạy ----
