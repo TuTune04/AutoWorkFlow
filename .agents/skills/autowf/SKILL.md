@@ -49,8 +49,12 @@ REVIEW_MODEL=
 ```
 
 Agent: `claude` | `codex` | `gemini` | `agy`; model rỗng = mặc định của agent (đổi agent mà không đặt model thì
-model mặc định của vai trò đó bị bỏ). Codex báo sai model `luna` thì đặt `REVIEW_MODEL=` (mặc định của Codex) hoặc
-đúng tên model người dùng muốn. Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL`.
+model mặc định của vai trò đó bị bỏ). `REVIEW_MODEL=luna` là tên ngắn: script tự quy ra model `luna` mới nhất trong
+danh mục Codex của tài khoản (vd. `gpt-6-luna`).
+
+**Chọn model: không bắt người dùng gõ tên.** Khi người dùng muốn đổi model, chạy `SCRIPT --models <agent>` để lấy
+danh sách model tài khoản của họ dùng được, rồi đưa danh sách đánh số (model mới/mạnh nhất trước) để họ chọn bằng
+số. Ghi lựa chọn vào `.autowf.env`. Model không có trong danh mục thì `--check` báo lỗi trước khi chạy. Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL`.
 
 ## 2. Kiểm tra môi trường
 

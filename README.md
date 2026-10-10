@@ -51,6 +51,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 - **Nhật ký:** tiến độ ghi vào `.auto-logs/run.log`, tóm tắt vào `.auto-logs/summary.md`. Góp ý không chặn của reviewer được gom vào `.auto-logs/nits.md`, còn tóm tắt từng task được nối vào `PROGRESS.md`.
 
 **Linh hoạt**
+- **Chọn model từ tài khoản:** `auto.sh --models` liệt kê model tài khoản của bạn dùng được (Codex: danh mục của tài khoản; Claude: các alias thử gọi được), và skill đưa danh sách đó cho bạn chọn thay vì bắt gõ tên. Tên ngắn như `luna` được quy ra model mới nhất cùng dòng (`gpt-6-luna`); tên sai bị `--check` chặn trước khi chạy.
 - **Đổi agent từng vai trò:** `PLANNER`, `CODER`, `REVIEWER` nhận `claude`, `codex`, `gemini` hoặc `agy`; model qua `PLAN_MODEL`, `CODER_MODEL`, `REVIEW_MODEL`. Đặt trong `.autowf.env` của repo dự án để ghi đè bộ agent của skill (`defaults.env`). Reviewer chỉ được đọc: nếu nó sửa file thì thay đổi bị bỏ. Có thể đặt agent dự phòng `FALLBACK_CODER` khi coder lỗi đăng nhập.
 - **Tác giả commit:** `GIT_USER_NAME` / `GIT_USER_EMAIL` đặt tác giả cho mọi commit; để trống thì dùng `git config`.
 
@@ -129,6 +130,7 @@ Nếu repo đã có `PLAN.md`, chỉ cần gõ `/autowf` để chạy hoặc ch�
 ### Chạy script trực tiếp
 
 ```bash
+./auto.sh --models                    # model tài khoản dùng được cho các agent đang dùng (hoặc --models codex)
 ./auto.sh --plan-only "mô tả dự án"   # planner viết + commit PLAN.md rồi dừng để bạn duyệt
 ./auto.sh                             # chạy (hoặc chạy tiếp) theo PLAN.md
 ./auto.sh "mô tả dự án"               # viết plan rồi chạy luôn, không dừng để duyệt

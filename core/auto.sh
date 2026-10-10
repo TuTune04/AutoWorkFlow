@@ -12,6 +12,8 @@
 #   ./auto.sh --preflight     chỉ kiểm tra quyền của agent (đăng nhập, từng lệnh, ghi file) và git hook rồi thoát
 #   ./auto.sh --stop-after    (từ tab khác, trong repo) lần chạy đang chạy dừng sau khi task hiện tại xong;
 #                             huỷ yêu cầu: ./auto.sh --no-stop-after
+#   ./auto.sh --models [agent]   liệt kê model tài khoản dùng được (codex: danh mục của tài khoản; claude: các
+#                             alias thử gọi được) cho các agent đang dùng hoặc cho <agent> rồi thoát
 #   ./auto.sh --notify-test   gửi thử một thông báo (Mac + ntfy nếu có NTFY_TOPIC) rồi thoát
 #   ./auto.sh --adopt N       nhận Task N đã làm/kiểm tra bằng tay: chạy TEST_CMD rồi commit thay đổi (hoặc
 #                             đổi tên commit HEAD) thành "Task N: <tiêu đề>" để lần chạy sau bỏ qua
@@ -73,6 +75,8 @@ CHECK_ONLY=0
 PREFLIGHT_ONLY=0
 PLAN_ONLY=0
 NOTIFY_TEST=0
+LIST_MODELS=0
+MODELS_AGENT=""
 STOP_AFTER=""
 ADOPT=""
 DESC=""
@@ -85,6 +89,8 @@ while [ $# -gt 0 ]; do
     --no-stop-after) STOP_AFTER=off ;;
     --preflight)  PREFLIGHT_ONLY=1 ;;
     --plan-only)  PLAN_ONLY=1 ;;
+    --models)     LIST_MODELS=1
+                  case "${2:-}" in claude|codex|gemini|agy) MODELS_AGENT="$2"; shift ;; esac ;;
     --adopt=*)    ADOPT="${1#--adopt=}"; [ -n "$ADOPT" ] || ADOPT=x ;;
     --adopt)      ADOPT="${2:-x}"; if [ $# -gt 1 ]; then shift; fi ;;
     -h|--help)    usage; exit 0 ;;
@@ -161,8 +167,84 @@ REVIEW_MODEL="${REVIEW_MODEL:-}"
 CODEX_MODEL="${CODEX_MODEL:-}"
 GIT_USER_NAME="${GIT_USER_NAME:-}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"
+# ---- Model: lấy từ danh sách tài khoản được dùng, không bắt người dùng nhớ tên ----
+# codex: danh mục của tài khoản đang đăng nhập (`codex debug models`, dự phòng ~/.codex/models_cache.json).
+# claude: CLI không có lệnh liệt kê; thử từng alias (fable/opus/sonnet/haiku — CLI tự quy ra model mới nhất tài khoản
+# dùng được) bằng một câu hỏi ngắn, lưu cache 24 giờ. gemini/agy: không có lệnh liệt kê → dùng mặc định của agent.
+codex_models() {  # in "slug<TAB>tên — mô tả", model mới nhất trước; trả về 1 nếu không đọc được
+  local json
+  command -v python3 >/dev/null || return 1
+  json=$(codex debug models 2>/dev/null) || json=$(cat "${CODEX_HOME:-$HOME/.codex}/models_cache.json" 2>/dev/null) || return 1
+  printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for m in (d.get("models", []) if isinstance(d, dict) else d):
+    if m.get("visibility", "list") == "list":
+        print(m["slug"] + "\t" + m.get("display_name", m["slug"]) + " — " + m.get("description", ""))
+' 2>/dev/null
+}
+CLAUDE_ALIASES="fable opus sonnet haiku"
+claude_alias_desc() {
+  case "$1" in
+    fable)  echo "Claude Fable — mạnh nhất, đắt nhất" ;;
+    opus)   echo "Claude Opus — rất mạnh, hợp để viết plan" ;;
+    sonnet) echo "Claude Sonnet — cân bằng, hợp để review/code" ;;
+    haiku)  echo "Claude Haiku — nhanh, rẻ" ;;
+  esac
+}
+claude_models() {  # in "alias<TAB>mô tả" các alias tài khoản dùng được (cache 24 giờ)
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/autowf/claude-models" a
+  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then cat "$cache"; return 0; fi
+  mkdir -p "$(dirname "$cache")"
+  for a in $CLAUDE_ALIASES; do
+    if claude -p "Reply with the single word OK." --model "$a" < /dev/null > /dev/null 2>&1; then
+      printf '%s\t%s\n' "$a" "$(claude_alias_desc "$a")"
+    fi
+  done | tee "$cache.tmp"
+  if [ -s "$cache.tmp" ]; then mv "$cache.tmp" "$cache"; else rm -f "$cache.tmp"; return 1; fi
+}
+list_models() {  # <agent> — in danh sách model chọn được
+  local out
+  case "$1" in
+    codex)
+      if out=$(codex_models) && [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/  /; s/\t/ — /'
+      else echo "  (không đọc được danh mục model của Codex — đã đăng nhập chưa? codex login status)"; fi ;;
+    claude)
+      if out=$(claude_models) && [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/  /; s/\t/ — /'
+      else echo "  (không gọi được Claude để kiểm tra alias — đã đăng nhập chưa?)"; fi ;;
+    *) echo "  ($1 không có lệnh liệt kê model — để trống *_MODEL để dùng mặc định của $1)" ;;
+  esac
+}
+# resolve_model <agent> <giá trị> — codex: tên đầy đủ giữ nguyên, tên ngắn (vd. "luna") quy ra model mới nhất trong
+# danh mục có chứa nó (gpt-6-luna). Không khớp model nào: in lỗi, trả về 1. Agent khác: giữ nguyên.
+resolve_model() {
+  local list hit
+  [ -n "$2" ] && [ "$1" = codex ] || { printf '%s' "$2"; return 0; }
+  list=$(codex_models | cut -f1) && [ -n "$list" ] || { printf '%s' "$2"; return 0; }   # không đọc được: để Codex tự báo
+  if grep -qxF "$2" <<< "$list"; then printf '%s' "$2"; return 0; fi
+  hit=$(grep -iF -m1 -- "$2" <<< "$list" || true)
+  [ -n "$hit" ] || return 1
+  printf '%s' "$hit"
+}
+MODEL_ERR=""
+for pair in PLANNER:PLAN_MODEL CODER:CODER_MODEL REVIEWER:REVIEW_MODEL; do
+  var="${pair#*:}"; agent="${pair%%:*}"; agent="${!agent}"
+  if resolved=$(resolve_model "$agent" "${!var}"); then printf -v "$var" '%s' "$resolved"
+  else MODEL_ERR+="$var=${!var} không có trong danh mục model của $agent (xem: auto.sh --models $agent)"$'\n'; fi
+done
+
 role_desc() { printf '%s%s' "$1" "${2:+ ($2)}"; }  # <agent> <model>
 AGENTS_DESC="plan: $(role_desc "$PLANNER" "$PLAN_MODEL"), code: $(role_desc "$CODER" "$CODER_MODEL"), review: $(role_desc "$REVIEWER" "$REVIEW_MODEL")"
+
+# ---- --models: liệt kê model tài khoản dùng được cho từng agent ----
+if [ "$LIST_MODELS" -eq 1 ]; then
+  for a in ${MODELS_AGENT:-$(printf '%s\n' "$PLANNER" "$CODER" "$REVIEWER" | awk '!seen[$0]++')}; do
+    echo "$a:"; list_models "$a"
+  done
+  echo "Đang dùng — $AGENTS_DESC"
+  echo "Đổi: đặt PLAN_MODEL / CODER_MODEL / REVIEW_MODEL trong .autowf.env (tên ngắn như \"luna\" được quy ra model mới nhất)"
+  exit 0
+fi
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 CODEX_NETWORK="${CODEX_NETWORK:-1}"
 CODEX_ARGS="${CODEX_ARGS:-}"
@@ -1026,6 +1108,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   for c in $(printf '%s\n' "$PLANNER" "$CODER" "$REVIEWER" ${FALLBACK_CODER:+"$FALLBACK_CODER"} | awk '!seen[$0]++'); do
     if command -v "$c" >/dev/null; then echo "✅ Đã cài $c"; else echo "❌ Chưa cài $c"; OK=0; fi
   done
+  if [ -n "$MODEL_ERR" ]; then printf '❌ %s\n' "${MODEL_ERR%$'\n'}"; OK=0; fi
   check_identity || OK=0
   if load_plan; then echo "✅ PLAN.md hợp lệ: $TOTAL task, TEST_CMD: $TEST_CMD"
   else echo "❌ PLAN.md: $PLAN_ERR"; OK=0; fi
@@ -1120,6 +1203,7 @@ if [ "$PLAN_ONLY" -eq 0 ]; then
   need "$CODER" "$(install_hint "$CODER")"
   need "$REVIEWER" "$(install_hint "$REVIEWER")"
 fi
+if [ -n "$MODEL_ERR" ]; then printf '❌ %s\n' "${MODEL_ERR%$'\n'}"; exit 1; fi
 if [ -n "$FALLBACK_CODER" ] && ! command -v "$FALLBACK_CODER" >/dev/null; then
   echo "⚠️  FALLBACK_CODER='$FALLBACK_CODER' chưa cài — sẽ không có agent dự phòng"
   FALLBACK_CODER=""

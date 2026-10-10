@@ -44,7 +44,14 @@ REVIEWER=codex
 ```
 
 Agent: `claude` | `codex` | `gemini` | `agy`; model rỗng = mặc định của agent (đổi agent mà không đặt model thì
-model mặc định của vai trò đó bị bỏ). Người dùng không có gói Claude trả phí thì gợi ý dùng skill autowf bản
+model mặc định của vai trò đó bị bỏ).
+
+**Chọn model: không bắt người dùng gõ tên.** Khi người dùng muốn đổi model, chạy `SCRIPT --models <agent>` để lấy
+danh sách model tài khoản của họ dùng được (Codex: danh mục của tài khoản; Claude: các alias `fable`/`opus`/
+`sonnet`/`haiku` thử gọi được — lần đầu mất vài giây, sau đó có cache), rồi hỏi bằng AskUserQuestion với các model
+đó làm lựa chọn (tối đa 4, model mới/mạnh nhất trước; người dùng vẫn chọn được "Other"). Ghi lựa chọn vào
+`.autowf.env`. Tên ngắn như `luna`, `sol` được script tự quy ra model mới nhất cùng dòng trong danh mục Codex;
+model không có trong danh mục thì `--check` báo lỗi trước khi chạy. Người dùng không có gói Claude trả phí thì gợi ý dùng skill autowf bản
 Codex/Antigravity (`./install.sh` trong repo AutoWorkFlow) thay vì đổi từng biến.
 Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL` (chỉ đặt khi người dùng yêu cầu).
 
