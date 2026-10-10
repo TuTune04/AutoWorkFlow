@@ -1,117 +1,65 @@
 ---
 name: autowf
-description: Chạy pipeline tự động viết phần mềm theo từng task, không cần gói Claude trả phí — Codex viết PLAN.md, Antigravity (agy, Gemini) viết code cho từng task, Codex review diff + kết quả test rồi commit "Task N" (mọi commit chỉ mang tên người dùng). Dùng khi người dùng muốn "lên plan rồi để agent code", "chạy autowf/auto.sh", hoặc chạy tiếp/dừng một pipeline autowf. Không dùng cho việc sửa code thông thường trong một lần.
+description: Chạy pipeline tự động viết phần mềm theo từng task, không cần gói Claude trả phí — Codex viết PLAN.md, Antigravity (agy, Gemini) viết code cho từng task (chưa có agy thì Codex viết), Codex review diff + kết quả test rồi commit "Task N" (mọi commit chỉ mang tên người dùng). Dùng khi người dùng muốn "lên plan rồi để agent code", "chạy autowf/auto.sh", hoặc chạy tiếp/dừng một pipeline autowf. Không dùng cho việc sửa code thông thường trong một lần.
 ---
 
-# autowf (Codex / Antigravity) — Codex lên plan, agy code, Codex review
+# autowf (Codex / Antigravity)
 
-Toàn bộ pipeline nằm trong `scripts/auto.sh` cạnh file SKILL.md này (gọi nó là `SCRIPT`; dùng đường dẫn tuyệt đối
-của thư mục chứa SKILL.md bạn vừa đọc). Script tự làm mọi thứ: tạo branch `auto/*`, gọi `codex exec` viết plan,
-gọi `agy -p` cho từng task, tự chạy `TEST_CMD`, gọi `codex exec` (sandbox chỉ đọc) review, sửa lại tối đa
-`MAX_TRIES` vòng, rồi commit `Task N: <tiêu đề>`. Bộ agent đặt trong `defaults.env` cạnh SKILL.md.
+`SCRIPT` = `scripts/auto.sh` cạnh file này (đường dẫn tuyệt đối của thư mục chứa SKILL.md). Script tự làm hết: branch
+`auto/*`, planner viết PLAN.md, coder làm từng task, tự chạy `TEST_CMD`, reviewer chấm, sửa tối đa `MAX_TRIES` vòng,
+commit `Task N: <tiêu đề>`. Bộ agent ở `defaults.env` (Codex plan, agy code — chưa có agy thì Codex code —, Codex
+review model `luna`, tự quy ra model luna mới nhất); `.autowf.env` ở repo đích ghi đè.
 
-**Vai trò của bạn chỉ là điều phối:** chạy script, trình plan cho người dùng duyệt, theo dõi, và xử lý khi script
-dừng. Không tự viết PLAN.md hay code thay cho các agent, và không tự commit thay cho script (trừ khi ghi quyết định
-của người dùng vào PLAN.md như bước 3 và 5).
+**Bạn chỉ điều phối:** không tự viết PLAN.md/code, không commit thay script (trừ ghi quyết định người dùng vào PLAN.md).
+**Commit:** chỉ mang tên người dùng; không `Co-Authored-By`/"Generated with" của bất kỳ AI nào; không đổi
+`git config user.*`, không `--author`.
+**Hỏi tối đa hai lần**, mỗi lần một câu bằng văn bản: (a) xin cài agent còn thiếu, (b) duyệt plan (bỏ nếu người dùng
+nói "chạy luôn"). Không hỏi chi tiết dự án — tự bổ sung giả định hợp lý; không hỏi "tiếp tục nhé?".
+Không bỏ bước nào dưới đây: kiểm tra → plan → chạy → báo kết quả và xử lý cho tới khi xong hoặc cần người quyết.
 
-**Quy tắc commit (bắt buộc):** mọi commit chỉ mang tác giả là người dùng (`GIT_USER_NAME`/`GIT_USER_EMAIL` trong
-`.autowf.env` nếu có, không thì `git config user.name/user.email`). Không thêm `Co-Authored-By:` hay dòng
-"Generated with ..." của Codex, ChatGPT, Gemini, Claude hay bất kỳ công cụ nào. Không đổi `git config user.*` và
-không dùng `--author`. Script tự bỏ các trailer đó và dừng nếu chưa có tác giả hoặc tác giả trông như AI/bot.
+**Chạy SCRIPT:** nó gọi lồng `codex exec`/`agy -p` (cần mạng, ghi `~/.codex`, `~/.gemini`) → Codex: xin quyền chạy ngoài
+sandbox cho lệnh SCRIPT; Antigravity: lệnh SCRIPT phải được cho phép. Lệnh ngắn (`--check`, `--plan-only`,
+`--preflight`, `--models`, `--stop-after`) chạy và chờ. Pipeline chạy lâu: `mkdir -p .auto-logs && setsid nohup SCRIPT >
+.auto-logs/pipeline.out 2>&1 < /dev/null &`, ~30 giây sau đọc `.auto-logs/run.log`; tiến trình bị harness dừng thì đưa
+người dùng đúng một lệnh chạy trong terminal: `cd <repo đích> && SCRIPT`.
 
-## Nguyên tắc: hỏi ít nhất có thể
+## 1. Kiểm tra (ở gốc repo đích; chưa phải git repo thì để script tự `git init`)
 
-Cả quy trình **chỉ có tối đa hai lần hỏi**, mỗi lần một câu ngắn bằng văn bản rồi chờ trả lời: (a) xin phép cài
-agent còn thiếu (nếu có), (b) duyệt plan (bỏ qua nếu người dùng nói "chạy luôn"). Không hỏi thêm chi tiết dự án khi
-mô tả đã đủ — planner tự chọn giả định hợp lý; người dùng sửa lúc duyệt plan. Không hỏi "tiếp tục nhé?" giữa các bước.
+`SCRIPT --check`: agent, tác giả commit, model, PLAN.md, git, hook. Xử lý:
+- Thiếu agent bắt buộc (planner/reviewer): hỏi một lần rồi cài (`npm i -g @openai/codex` / `@google/gemini-cli`;
+  `agy` người dùng tự cài — không bắt buộc, đã có Codex dự phòng).
+- Chưa đăng nhập Codex: nhờ người dùng `codex login` (container: `codex login --device-auth`); họ dán URL
+  `http://127.0.0.1:1455/auth/callback?...` thì `curl '<URL>'`.
+- Git không sạch (trừ `.autowf.env`): hỏi commit hay stash.
+- Người dùng muốn đổi agent/model: `SCRIPT --models <agent>` lấy model tài khoản dùng được → đưa danh sách đánh số
+  (mạnh nhất trước) để chọn bằng số → ghi `PLANNER|CODER|REVIEWER`, `PLAN_MODEL|CODER_MODEL|REVIEW_MODEL` vào
+  `.autowf.env`. Không bắt gõ tên model.
 
-## Chạy SCRIPT trong harness này
+## 2. Plan (khi chưa có PLAN.md)
 
-Script gọi lồng `codex exec` và `agy -p`: chúng cần mạng và ghi được vào `~/.codex`, `~/.gemini`. Vì vậy:
+- "Chạy luôn": `SCRIPT "<mô tả>"` theo cách chạy pipeline ở trên.
+- Mặc định: `SCRIPT --plan-only "<mô tả>"`, rồi `SCRIPT --preflight` (nếu coder là agy: lệnh của `TEST_CMD` script tự
+  cho phép, chỉ quy tắc trong config của agy — `$AGY_CONFIG`, mặc định `~/.gemini/config/config.json` — cần người dùng
+  đồng ý). Trình bày ngắn `TEST_CMD`, các `## Task N`, giả định đáng chú ý và quy tắc quyền còn thiếu (nếu có); hỏi
+  **một câu** gộp: chạy luôn (kèm thêm quy tắc) hay sửa. Đồng ý → thêm quy tắc vào `globalPermissionGrants.allow`, bước 3.
+  Sửa → sửa PLAN.md giữ định dạng (`TEST_CMD: ...`, `## Task N: <tiêu đề>` liên tục từ 1),
+  `git commit -am "PLAN.md: <thay đổi>"`, rồi bước 3.
 
-- **Codex:** chạy SCRIPT ngoài sandbox — xin quyền nâng cao (escalated / không sandbox) cho đúng lệnh SCRIPT.
-  Trong sandbox `workspace-write` mặc định, lệnh `codex exec` lồng bên trong sẽ không gọi được API.
-- **Antigravity:** lệnh SCRIPT phải được cho phép (allowlist hoặc người dùng duyệt khi được hỏi).
-- Lệnh ngắn (`--check`, `--plan-only`, `--stop-after`) chạy trực tiếp và chờ kết quả.
-- Pipeline (bước 4) có thể chạy hàng giờ, lâu hơn giới hạn thời gian một lệnh của harness: chạy tách nền
-  `mkdir -p .auto-logs && setsid nohup SCRIPT > .auto-logs/pipeline.out 2>&1 < /dev/null &`, khoảng 30 giây sau
-  đọc `.auto-logs/run.log` để chắc nó đang chạy. Nếu tiến trình bị harness dừng theo lệnh, đưa người dùng đúng một lệnh để chạy trong
-  terminal của họ: `cd <repo đích> && SCRIPT`.
+## 3. Chạy
 
-## 1. Bộ agent (không hỏi)
+Chạy `SCRIPT` theo cách chạy pipeline ở trên. Tiến độ: `tail .auto-logs/run.log`, `git log --oneline`.
+Dừng sau task hiện tại: `SCRIPT --stop-after` (huỷ: `--no-stop-after`).
 
-Mặc định: Codex viết plan, `agy` code, Codex (model `luna`) review. Chỉ khi người dùng yêu cầu đổi mới ghi vào
-`.autowf.env` ở gốc repo đích (tạo nếu chưa có, giữ các dòng khác) — các biến ở đó thắng `defaults.env`:
+## 4. Khi kết thúc
 
-```bash
-CODER=gemini
-REVIEW_MODEL=
-```
+Đọc `.auto-logs/summary.md` (mã thoát cuối `.auto-logs/pipeline.out`), báo theo mã, xử lý xong thì chạy lại `SCRIPT`:
+- 0 xong: tóm tắt task, nits (`.auto-logs/nits.md`), branch `auto/*` để merge.
+- 1 task FAIL hết vòng (hoặc thiếu tác giả commit): trình `REVIEW.md`, log `.auto-logs/task<N>-*`; đề xuất làm rõ/chia nhỏ
+  task, hoặc sửa tay rồi `SCRIPT --adopt N`.
+- 2 cầu dao: trình lỗi và "Cách xử lý" script in ra. 3 quá `MAX_WAIT_HOURS`: báo giờ reset.
+- 4 không gọi được reviewer: kiểm tra đăng nhập/mạng/`REVIEW_MODEL`.
+- 5 preflight: trình báo cáo và quy tắc cần thêm vào config của agy; được đồng ý thì thêm rồi chạy lại.
+- 6 `REQUIRE_CMD` chưa chạy: nhờ bật dịch vụ.
+- 7 plan-gap: trình các lựa chọn reviewer nêu, **hỏi người dùng**, ghi vào đúng Task trong PLAN.md, commit, chạy lại.
 
-Agent: `claude` | `codex` | `gemini` | `agy`; model rỗng = mặc định của agent (đổi agent mà không đặt model thì
-model mặc định của vai trò đó bị bỏ). `REVIEW_MODEL=luna` là tên ngắn: script tự quy ra model `luna` mới nhất trong
-danh mục Codex của tài khoản (vd. `gpt-6-luna`).
-
-**Chọn model: không bắt người dùng gõ tên.** Khi người dùng muốn đổi model, chạy `SCRIPT --models <agent>` để lấy
-danh sách model tài khoản của họ dùng được, rồi đưa danh sách đánh số (model mới/mạnh nhất trước) để họ chọn bằng
-số. Ghi lựa chọn vào `.autowf.env`. Model không có trong danh mục thì `--check` báo lỗi trước khi chạy. Tác giả commit khác `git config`: `GIT_USER_NAME`, `GIT_USER_EMAIL`.
-
-## 2. Kiểm tra môi trường
-
-Chạy ở gốc repo đích (không phải thư mục skill). Repo đích chưa phải git repo thì cứ để script tự `git init`.
-
-- `SCRIPT --check` — in bộ agent, kiểm tra agent đã cài chưa, tác giả commit, PLAN.md, git và git hook. Thiếu agent
-  thì hỏi **một lần** xin cài tất cả agent còn thiếu, được đồng ý thì cài:
-  - Codex CLI: `npm i -g @openai/codex`; Gemini CLI: `npm i -g @google/gemini-cli`.
-  - Antigravity CLI (`agy`): người dùng tự cài; quyền lệnh của agy nằm trong `~/.gemini/config/config.json`
-    (preflight của script in đúng quy tắc còn thiếu — trình nguyên văn cho người dùng).
-- Đăng nhập: thử trước (`codex login status`); chỉ khi chưa đăng nhập mới nhờ người dùng chạy `codex login`
-  (trong Codespaces/container: `codex login --device-auth`). Người dùng dán URL
-  `http://127.0.0.1:1455/auth/callback?...` thì gửi nó tới tiến trình `codex login` đang chờ bằng `curl '<URL>'`.
-- `git status --porcelain` phải sạch. Chỉ khi không sạch mới hỏi người dùng muốn commit hay stash; không tự quyết.
-
-## 3. Viết plan (chỉ khi chưa có PLAN.md)
-
-Mô tả dự án lấy từ yêu cầu của người dùng; chỉ hỏi khi không có. Mô tả ngắn thì tự bổ sung giả định hợp lý (stack
-đơn giản, không phụ thuộc ngoài, có test chạy được) vào mô tả gửi cho planner.
-
-- Người dùng muốn chạy luôn: chạy `SCRIPT "<mô tả dự án>"` theo cách chạy pipeline ở trên — viết plan rồi code luôn.
-- Mặc định: `SCRIPT --plan-only "<mô tả dự án>"` (có thể mất vài phút), rồi ngay sau đó `SCRIPT --preflight` để
-  biết agy còn thiếu quyền gì (lệnh của `TEST_CMD` script tự thêm vào `AGY_ALLOWED_CMDS`; chỉ quy tắc trong
-  `~/.gemini/config/config.json` — hoặc `$AGY_CONFIG` — là cần người dùng cho phép). Trình bày ngắn `TEST_CMD`, danh
-  sách `## Task N`, giả định đáng chú ý, và (nếu có) các quy tắc quyền còn thiếu, rồi hỏi **một câu** gộp cả hai:
-  chạy luôn (kèm thêm các quy tắc đó) hay sửa gì. Đồng ý (kể cả "ok", "chạy đi") là thêm quy tắc vào
-  `globalPermissionGrants.allow` rồi chạy bước 4 ngay. Nếu sửa: sửa PLAN.md theo ý họ, giữ đúng định dạng (dòng `TEST_CMD: ...`, heading
-  `## Task N: <tiêu đề>` đánh số liên tục từ 1), `git commit -am "PLAN.md: <thay đổi>"` (message một dòng, không
-  trailer co-author), rồi chạy bước 4 luôn — không hỏi duyệt lại.
-
-Đã có PLAN.md thì bỏ qua bước này (task đã có commit "Task N" sẽ được bỏ qua — chạy tiếp được).
-
-## 4. Chạy pipeline
-
-Chạy `SCRIPT` theo mục "Chạy SCRIPT trong harness này". Khi người dùng hỏi tiến độ: `tail .auto-logs/run.log` hoặc
-`git log --oneline`. Muốn dừng: `SCRIPT --stop-after` (dừng sau khi task hiện tại xong; huỷ: `--no-stop-after`).
-
-## 5. Khi script kết thúc
-
-Đọc `.auto-logs/summary.md` (mã thoát ở cuối `.auto-logs/pipeline.out` hoặc dòng "Kết thúc" trong summary) và báo:
-
-| Mã | Ý nghĩa | Việc cần làm |
-|---|---|---|
-| 0 | Xong hết (hoặc dừng theo `--stop-after`) | Tóm tắt các task, nits trong `.auto-logs/nits.md`, branch `auto/*` để người dùng merge |
-| 1 | Task FAIL sau khi hết số vòng sửa (hoặc chưa có tác giả commit hợp lệ) | Trình `REVIEW.md` + log `.auto-logs/task<N>-*`; đề xuất làm rõ/chia nhỏ task trong PLAN.md, hoặc sửa tay rồi `SCRIPT --adopt N` |
-| 2 | Cầu dao (agent không sửa file, rời branch, lệnh bị từ chối...) | Trình thông báo lỗi và "Cách xử lý" script in ra |
-| 3 | Chờ hết hạn mức quá `MAX_WAIT_HOURS` | Báo giờ reset; chạy lại sau |
-| 4 | Không gọi được reviewer | Kiểm tra Codex đăng nhập / mạng / tên model (`REVIEW_MODEL`) |
-| 5 | Preflight chưa đạt (đăng nhập agy, quyền lệnh, ghi file, git hook) | Trình báo cáo và quy tắc cần thêm vào `~/.gemini/config/config.json`; được đồng ý thì thêm rồi chạy lại luôn |
-| 6 | Dịch vụ trong `REQUIRE_CMD` chưa chạy | Nhờ người dùng bật dịch vụ |
-| 7 | plan-gap: PLAN.md thiếu một quyết định | Trình các lựa chọn reviewer nêu, **hỏi người dùng quyết**, ghi vào đúng phần Task đó trong PLAN.md (không đổi heading), commit, rồi chạy lại bước 4 |
-
-Sau khi xử lý xong, chạy lại `SCRIPT` — task đã commit được bỏ qua.
-
-## Cấu hình
-
-Thứ tự ưu tiên: mặc định của script < `defaults.env` của skill < `.autowf.env` ở repo đích < biến môi trường.
-Hay dùng: `PLANNER`/`CODER`/`REVIEWER` và `*_MODEL`, `FALLBACK_CODER`, `GIT_USER_NAME`, `GIT_USER_EMAIL`,
-`AGY_ALLOWED_CMDS` (lệnh agy được dùng — phải khớp allowlist của agy), `AGY_ALLOW_MCP`, `MAX_TRIES` (3),
-`MAX_WAIT_HOURS` (6), `REQUIRE_CMD`, `NTFY_TOPIC`. Xem đủ bằng `SCRIPT --help`.
+Cấu hình khác (`MAX_TRIES`, `GIT_USER_NAME/EMAIL`, `AGY_ALLOWED_CMDS`, `REQUIRE_CMD`, `NTFY_TOPIC`...): `SCRIPT --help`.

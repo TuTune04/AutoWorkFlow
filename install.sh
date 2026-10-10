@@ -4,6 +4,8 @@
 # Cài bằng một lệnh, không cần clone repo (tham số giống hệt bên dưới, đặt sau "bash -s --"):
 #   curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- 2 codex
+# Agent (Claude Code, Codex, Antigravity) chạy lệnh đầu không tham số: không có terminal để hỏi → tự cài v2 cho
+# chính harness đang chạy nó (dò tiến trình cha), không hỏi gì.
 #
 # Cách dùng:
 #   ./install.sh                        hỏi chọn (cần terminal tương tác)
@@ -23,7 +25,9 @@ set -euo pipefail
 
 usage() { cat <<'USAGE'
 Cài skill autowf.
-  install.sh                        hỏi chọn phiên bản và harness
+  install.sh                        hỏi chọn phiên bản và harness (không có terminal, vd. agent chạy: tự cài v2
+                                    cho harness đang chạy nó)
+  install.sh auto                   như trên nhưng không hỏi
   install.sh 1                      v1 cho Claude Code (Opus plan, Codex code, Sonnet review cố định)
   install.sh 2 claude|codex|antigravity [...]   v2 cho một hoặc nhiều harness
   install.sh ... --project DIR      chỉ cài cho repo DIR
@@ -55,6 +59,7 @@ PROJECT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    auto)        VERSION=auto ;;
     1|v1)        VERSION=1 ;;
     2|v2)        VERSION=2 ;;
     claude|codex|antigravity) HARNESSES+=" $1" ;;
@@ -81,6 +86,31 @@ ask() {  # <câu hỏi> → in câu trả lời
   read -r a < "$TTY"; printf '%s' "$a"
 }
 
+# Harness đang chạy script: tiến trình cha gần nhất là claude/codex/agy (so tên chương trình, không so cả dòng lệnh —
+# đường dẫn có thể chứa chữ "claude"); không thấy thì dựa vào CLAUDECODE; vẫn không thấy thì mọi CLI agent đã cài.
+detect_harness() {
+  local pid=$$ i args w b
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || break
+    for w in $(printf '%s' "$args" | awk '{ print $1, $2 }'); do
+      b=${w##*/}
+      case "$b" in claude) echo claude; return ;; codex) echo codex; return ;; agy|antigravity) echo antigravity; return ;; esac
+    done
+  done
+  if [ -n "${CLAUDECODE:-}" ]; then echo claude; return; fi
+  for b in claude codex agy; do
+    if command -v "$b" >/dev/null; then case "$b" in agy) echo antigravity ;; *) echo "$b" ;; esac; fi
+  done
+}
+if [ -z "$VERSION" ] && [ -z "$TTY" ]; then VERSION=auto; fi
+if [ "$VERSION" = auto ]; then
+  VERSION=2
+  if [ -z "$HARNESSES" ]; then HARNESSES=" $(detect_harness | tr '\n' ' ')"; fi
+  [ -n "${HARNESSES// /}" ] || { echo "❌ Không nhận ra harness nào (claude/codex/agy). Chạy: install.sh 2 <claude|codex|antigravity>"; exit 1; }
+  echo "🔎 Tự chọn: v2 cho$HARNESSES"
+fi
 if [ -z "$VERSION" ]; then
   need_tty
   echo "Chọn phiên bản skill autowf:"

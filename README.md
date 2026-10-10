@@ -1,5 +1,17 @@
 # autowf — một agent lên plan, một agent viết code, một agent review
 
+> **Cài đặt (một lệnh, không cần clone):** dán link repo này cho agent bạn đang dùng (Claude Code, Codex,
+> Antigravity) và nói "cài skill này". Agent chỉ cần chạy:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash          # v2, tự nhận harness
+> curl -fsSL https://raw.githubusercontent.com/TuTune04/AutoWorkFlow/main/install.sh | bash -s -- 1  # v1 (Claude Code, ổn định)
+> ```
+>
+> Chạy từ agent (không có terminal để hỏi), script tự cài bản v2 cho đúng harness đang chạy nó, không hỏi gì và không
+> cần skill hay trình cài nào khác. Sau đó gọi `/autowf <mô tả dự án>` (Codex: `$autowf ...`). Agent viết code mặc định
+> chưa cài thì skill tự dùng agent dự phòng (Codex hoặc Claude). Chọn bản v1 hay harness khác: xem [Cài skill](#2-cài-skill--chọn-phiên-bản-và-harness).
+
 **autowf** là một skill (cho Claude Code, Codex hoặc Antigravity) kèm theo script `auto.sh`. Nó tự động làm một dự án phần mềm theo từng task:
 
 1. **Planner** (mặc định Claude Opus 5.5) viết `PLAN.md`: chia dự án thành các task nhỏ, mỗi task có tiêu chí nghiệm thu kiểm chứng được bằng test.
@@ -83,6 +95,7 @@ Mọi thứ chạy trên một branch `auto/*` riêng, nên nhánh chính không
 | Agent | Cố định: Claude Opus plan, Codex code, Claude Sonnet review | Theo harness (bảng ở đầu trang); đổi được từng vai trò qua `.autowf.env` |
 | Tác giả commit | `git config` | `GIT_USER_NAME`/`GIT_USER_EMAIL` hoặc `git config`; không bao giờ có `Co-authored-by` của AI |
 | Hỏi người dùng | Duyệt plan | Tối đa hai lần: xin cài agent thiếu, duyệt plan (bỏ được) |
+| Nguồn | `versions/v1/autowf/` — bản skill ở commit `37c257c` ("update readme"), giữ nguyên | `core/auto.sh` + `.claude/skills/autowf/`, `.agents/skills/autowf/` |
 | Khi nào chọn | Muốn ổn định, ít thành phần, ít lỗi hơn | Dùng Codex/Antigravity, không có gói Claude trả phí, hoặc muốn trộn agent |
 
 Cài bằng **một lệnh**, không cần clone repo:

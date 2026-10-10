@@ -226,6 +226,14 @@ resolve_model() {
   [ -n "$hit" ] || return 1
   printf '%s' "$hit"
 }
+# Coder mặc định của skill chưa cài (vd. agy) mà FALLBACK_CODER có sẵn → dùng luôn agent dự phòng, không bắt người
+# dùng cài thêm hay đổi cấu hình. Người dùng đặt CODER rõ ràng (.autowf.env/env) thì giữ nguyên và báo thiếu như cũ.
+if ! command -v "$CODER" >/dev/null && [ -n "$FALLBACK_CODER" ] && command -v "$FALLBACK_CODER" >/dev/null \
+   && ! grep -q '^CODER=' <<< "$USER_CONFIG"; then
+  echo "ℹ️  Chưa cài $CODER — $FALLBACK_CODER viết code thay (cài $CODER để dùng lại bộ mặc định)"
+  CODER="$FALLBACK_CODER"; CODER_MODEL=""; FALLBACK_CODER=""
+fi
+
 MODEL_ERR=""
 for pair in PLANNER:PLAN_MODEL CODER:CODER_MODEL REVIEWER:REVIEW_MODEL; do
   var="${pair#*:}"; agent="${pair%%:*}"; agent="${!agent}"
